@@ -16,6 +16,7 @@
 #include "collider.h"
 #include "flightmodel.h"
 #include "gfx.h"
+#include "instruments.h"
 #include "phi.h"
 #include "pid.h"
 #include "terrain.h"
@@ -42,7 +43,7 @@ JK      control thrust
 #define NPC_AIRCRAFT       0
 #define SHOW_MASS_ELEMENTS 0
 #define USE_PID            1
-#define PS1_RESOLUTION     1
+#define PS1_RESOLUTION     0
 #define DEBUG_INFO         0
 
 /* select flightmodel */
@@ -53,7 +54,7 @@ JK      control thrust
 #if PS1_RESOLUTION
 constexpr glm::ivec2 RESOLUTION{640, 480};
 #else
-constexpr glm::ivec2 RESOLUTION{1024, 728};
+constexpr glm::ivec2 RESOLUTION{1920, 1080};
 #endif
 
 struct Joystick {
@@ -104,6 +105,26 @@ int main(void)
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+
+  // fonts for the instrument panel, fall back to the imgui default font
+  instruments::Style instrument_style;
+  {
+    ImGuiIO& io = ImGui::GetIO();
+    instrument_style.font =
+        io.Fonts->AddFontFromFileTTF("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16.0f);
+    instrument_style.font_big =
+        io.Fonts->AddFontFromFileTTF("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20.0f);
+    instrument_style.font_size     = 16.0f;
+    instrument_style.font_big_size = 20.0f;
+    if (instrument_style.font == nullptr) {
+      instrument_style.font      = io.Fonts->AddFontDefault();
+      instrument_style.font_size = 13.0f;
+    }
+    if (instrument_style.font_big == nullptr) {
+      instrument_style.font_big      = instrument_style.font;
+      instrument_style.font_big_size = instrument_style.font_size + 4.0f;
+    }
+  }
 
   glViewport(0, 0, RESOLUTION.x, RESOLUTION.y);
   glEnable(GL_DEPTH_TEST);
@@ -387,11 +408,8 @@ int main(void)
   SDL_Event event;
   bool quit = false, paused = false, orbit = false;
   uint64_t last = 0, now = SDL_GetPerformanceCounter();
-  phi::Seconds dt, timer = 0, log_timer = 0, flight_time = 0.0f, hud_timer = 0.0f;
+  phi::Seconds dt, timer = 0, log_timer = 0, flight_time = 0.0f;
   float fps = 0.0f;
-
-  float alt{}, spd{}, ias{}, aoa{}, gee{};
-  int thr{};
 
   while (!quit) {
     // delta time in seconds
@@ -491,30 +509,61 @@ int main(void)
     window_flags |= ImGuiWindowFlags_NoTitleBar;
     window_flags |= ImGuiWindowFlags_NoMove;
     window_flags |= ImGuiWindowFlags_NoResize;
+    window_flags |= ImGuiWindowFlags_NoInputs;
 
-    if ((hud_timer += dt) > 0.1f) {
-      hud_timer = 0.0f;
-      alt = player.airplane.get_altitude();
-      spd = phi::units::kilometer_per_hour(player.airplane.get_speed());
-      ias = phi::units::kilometer_per_hour(player.airplane.get_ias());
-      thr = player.airplane.throttle;
-      gee = player.airplane.get_g();
-      aoa = player.airplane.get_aoa();
+    // instrument panel on the left side of the window
+    {
+      auto& ac = player.airplane;
+
+      glm::vec3 euler_deg = glm::degrees(ac.get_euler_angles());
+      float roll_deg = euler_deg.x, pitch_deg = euler_deg.z;
+
+      glm::vec3 fwd    = ac.forward();
+      float heading_deg = std::fmod(glm::degrees(std::atan2(fwd.z, fwd.x)) + 360.0f, 360.0f);
+
+      float ias_kmh        = phi::units::kilometer_per_hour(ac.get_ias());
+      float vertical_speed = ac.velocity.y;
+
+      ImGui::SetNextWindowPos(ImVec2(0, 0));
+      ImGui::SetNextWindowSize(ImVec2(300, RESOLUTION.y));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.045f, 0.05f, 0.60f));
+      ImGui::Begin("Instruments", nullptr, window_flags);
+
+      ImDrawList* dl  = ImGui::GetWindowDrawList();
+      const ImVec2 wp = ImGui::GetWindowPos();
+
+      instruments::draw_attitude_indicator(dl, instrument_style, ImVec2(wp.x + 150.0f, wp.y + 165.0f), 130.0f,
+                                           pitch_deg, roll_deg);
+      instruments::draw_heading_indicator(dl, instrument_style, ImVec2(wp.x + 150.0f, wp.y + 455.0f), 115.0f,
+                                          heading_deg);
+      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 15.0f, wp.y + 620.0f), ImVec2(65.0f, 430.0f),
+                             "IAS km/h", ias_kmh, 2.0f, 10.0f, 5, false);
+      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 220.0f, wp.y + 620.0f), ImVec2(65.0f, 430.0f),
+                             "ALT m", ac.get_altitude(), 0.4f, 25.0f, 4, true);
+
+      // textual readouts between the two tapes
+      const ImU32 white = instruments::WHITE;
+      char buf[64];
+      float tx = wp.x + 92.0f, ty = wp.y + 645.0f;
+      auto line = [&](const char* text) {
+        if (instrument_style.font) {
+          dl->AddText(instrument_style.font, instrument_style.font_size, ImVec2(tx, ty), white, text);
+        } else {
+          dl->AddText(ImVec2(tx, ty), white, text);
+        }
+        ty += 30.0f;
+      };
+      snprintf(buf, sizeof(buf), "V/S  %+.1f m/s", vertical_speed), line(buf);
+      snprintf(buf, sizeof(buf), "G    %.1f", ac.get_g()), line(buf);
+      snprintf(buf, sizeof(buf), "AoA  %.1f", ac.get_aoa()), line(buf);
+      snprintf(buf, sizeof(buf), "THR  %.0f %%", ac.throttle * 100.0f), line(buf);
+      snprintf(buf, sizeof(buf), "MACH %.2f", ac.get_mach()), line(buf);
+      snprintf(buf, sizeof(buf), "TRIM %.2f", ac.joystick.w), line(buf);
+      snprintf(buf, sizeof(buf), "FPS  %.1f", fps), line(buf);
+
+      ImGui::End();
+      ImGui::PopStyleColor();
     }
-
-    ImGui::SetNextWindowPos(ImVec2(10, 10));
-    ImGui::SetNextWindowSize(ImVec2(145, 160));
-    ImGui::SetNextWindowBgAlpha(0.35f);
-    ImGui::Begin("Flightsim", nullptr, window_flags);
-    ImGui::Text("ALT:   %.1f m", alt);
-    ImGui::Text("SPD:   %.1f km/h", spd);
-    ImGui::Text("IAS:   %.1f km/h", ias);
-    ImGui::Text("THR:   %.1f %%", player.airplane.throttle * 100.0f);
-    ImGui::Text("G:     %.1f", gee);
-    ImGui::Text("AoA:   %.2f", aoa);
-    ImGui::Text("Trim:  %.2f", player.airplane.joystick.w);
-    ImGui::Text("FPS:   %.1f", fps);
-    ImGui::End();
 
 #if DEBUG_INFO
     auto angular_velocity = glm::degrees(player.airplane.angular_velocity);

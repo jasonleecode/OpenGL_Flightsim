@@ -16,6 +16,7 @@ add_executable(flightsim
     src/flightmodel.h
     src/gfx.cpp
     src/gfx.h
+    src/instruments.h
     src/main.cpp
     src/phi.h
     src/pid.h
