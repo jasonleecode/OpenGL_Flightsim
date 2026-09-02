@@ -218,9 +218,13 @@ class Camera : public Object3D
 {
  public:
   Camera(float fov, float aspect, float near, float far)
-      : m_projection(glm::perspective(fov, aspect, near, far)), m_up(0.0f, 1.0f, 0.0f), m_front(0.0f, 0.0f, 1.0f)
+      : m_projection(glm::perspective(fov, aspect, near, far)), m_up(0.0f, 1.0f, 0.0f), m_front(0.0f, 0.0f, 1.0f),
+        m_fov(fov), m_near(near), m_far(far)
   {
   }
+
+  // recompute the projection after the window (and with it the aspect ratio) changed
+  void set_aspect(float aspect) { m_projection = glm::perspective(m_fov, aspect, m_near, m_far); }
 
   Object3D::Type get_type() const override;
   glm::mat4 get_view_matrix() const;
@@ -230,6 +234,7 @@ class Camera : public Object3D
  private:
   glm::mat4 m_projection;
   glm::vec3 m_up, m_front;
+  float m_fov, m_near, m_far;
 };
 
 class Light : public Object3D
@@ -426,6 +431,12 @@ class Renderer
   }
 
   void render(Camera& camera, Object3D& scene);
+  // update the render viewport after the window size changed
+  void set_size(unsigned int width, unsigned int height)
+  {
+    m_width  = width;
+    m_height = height;
+  }
   glm::vec3 background;
 
  private:

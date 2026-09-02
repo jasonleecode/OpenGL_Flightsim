@@ -13,6 +13,7 @@
 #include "../lib/imgui/imgui_impl_opengl3.h"
 #include "../lib/imgui/imgui_impl_sdl2.h"
 #include "ai.h"
+#include "audio.h"
 #include "collider.h"
 #include "flightmodel.h"
 #include "gfx.h"
@@ -27,7 +28,7 @@ using std::make_shared;
 using std::shared_ptr;
 
 std::string USAGE = R"(
-Usage: 
+Usage:
 
 P       pause game
 O       toggle camera
@@ -35,6 +36,19 @@ I       toggle wireframe terrain
 WASD    control pitch and roll
 EQ      control yaw
 JK      control thrust
+F1      toggle flight instruments
+F2      toggle radar
+F3      toggle map
+F10     cycle camera view (chase / side / above wing)
+F11     toggle fullscreen
+
+Gamepad:
+left stick      pitch and roll
+right stick     yaw
+LT/RT           decrease / increase thrust
+dpad up/down    pitch trim
+start           pause game
+back            toggle camera
 )";
 
 #define CLIPMAP            1
@@ -181,6 +195,7 @@ struct GameObject {
 };
 
 void get_keyboard_state(Joystick& joystick, phi::Seconds dt);
+void poll_gamepad(SDL_GameController* gamepad, Joystick& joystick, phi::Seconds dt);
 
 int main(void)
 {
@@ -249,7 +264,21 @@ int main(void)
   PID pitch_control_pid(1.0f, 0.0f, 0.0f);
 
   int num_joysticks = SDL_NumJoysticks();
-  bool joystick_control = num_joysticks > 0;
+
+  // prefer the game controller api (standardized button/axis mapping) over the
+  // raw joystick api, fall back to the raw api for non-mappable devices
+  SDL_GameController* gamepad = nullptr;
+  for (int i = 0; i < num_joysticks; i++) {
+    if (SDL_IsGameController(i)) {
+      gamepad = SDL_GameControllerOpen(i);
+      if (gamepad != nullptr) {
+        std::cout << "found gamepad: " << SDL_GameControllerName(gamepad) << std::endl;
+        break;
+      }
+    }
+  }
+
+  bool joystick_control = gamepad == nullptr && num_joysticks > 0;
   if (joystick_control) {
     std::cout << "found " << num_joysticks << " joysticks\n";
     SDL_JoystickEventState(SDL_ENABLE);
@@ -259,6 +288,16 @@ int main(void)
     joystick.num_buttons = SDL_JoystickNumButtons(sdl_joystick);
     printf("found %d buttons, %d axis\n", joystick.num_buttons, joystick.num_axis);
   }
+
+  // sound effects: engine loop follows the throttle, radio chatter loops quietly.
+  // the wav files are optional, missing files only print a warning
+  audio::Player audio_player;
+  audio_player.init();
+  const int engine_sound = audio_player.load("assets/audio/engine.wav", 0.6f);
+  const int radio_sound  = audio_player.load("assets/audio/radio.wav", 0.35f);
+  audio_player.play(engine_sound);
+  audio_player.play(radio_sound);
+  audio_player.start();
 
   gfx::Renderer renderer(RESOLUTION.x, RESOLUTION.y);
 
@@ -298,6 +337,22 @@ int main(void)
   gfx::gl::Texture map_texture(PATH + "texture.png", gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
   const float map_terrain_size = MAX_TILE_SIZE / ZOOM_FACTOR;
 
+  // heightmap for terrain height lookups (used by the pull-up warning)
+  int hm_width = 0, hm_height = 0, hm_channels = 0;
+  uint8_t* hm_data =
+      gfx::gl::Texture::load_image(PATH + "heightmap.png", &hm_width, &hm_height, &hm_channels, false);
+
+  // terrain height at world (x, z), same mapping and scale as the terrain shader
+  auto terrain_height = [&](float x, float z) {
+    if (hm_data == nullptr) return 0.0f;
+    float u = x / map_terrain_size + 0.5f;
+    float v = z / map_terrain_size + 0.5f;
+    if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) return 0.0f;
+    int px = glm::clamp(static_cast<int>(u * hm_width), 0, hm_width - 1);
+    int py = glm::clamp(static_cast<int>(v * hm_height), 0, hm_height - 1);
+    return 3000.0f * hm_data[(py * hm_width + px) * hm_channels] / 255.0f;
+  };
+
   // low-res texture + fbo for the frosted glass status bar: the framebuffer region
   // behind the bar is blitted into this texture each frame and stretched back for a blur
   const glm::ivec2 glass_tex_size(160, 16);
@@ -313,6 +368,23 @@ int main(void)
   glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glass_tex.id, 0);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  // low-res textures for the frosted glass panel backgrounds, same trick as the status bar.
+  // they are blitted into the shared fbo one at a time after the scene is rendered
+  auto make_blur_tex = [](int width, int height) {
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+  };
+  const glm::ivec2 pfd_blur_size(96, 79), scope_blur_size(62, 62);  // roughly 1/5 of the panel size
+  const GLuint pfd_blur_tex   = make_blur_tex(pfd_blur_size.x, pfd_blur_size.y);
+  const GLuint radar_blur_tex = make_blur_tex(scope_blur_size.x, scope_blur_size.y);
+  const GLuint map_blur_tex   = make_blur_tex(scope_blur_size.x, scope_blur_size.y);
 #if 0
   int width, height, channels;
   const std::string heightmap_path = "assets/textures/terrain/1/heightmap.png";
@@ -399,7 +471,33 @@ int main(void)
 
   SDL_Event event;
   bool quit = false, paused = false, orbit = false;
+  int view_mode = 0;  // F10 cycles: 0 = chase, 1 = side, 2 = above the wing
   bool show_settings = false;
+  bool glass_panels = false;            // frosted glass panel backgrounds instead of solid black
+  float warning_altitude = 150.0f;      // pull-up warning below this altitude
+
+  // panel geometry in imgui coordinates (origin top left): fixed sizes, the slots are
+  // computed per frame from the current window size so the panels never stretch
+  const ImVec2 status_bar_size(760.0f, 62.0f);
+  const ImVec2 pfd_win_size(500.0f, 415.0f), pfd_box_size(480.0f, 395.0f);
+  const ImVec2 scope_win_size(330.0f, 330.0f), scope_box_size(310.0f, 310.0f);
+  const ImVec2 box_offset(10.0f, 10.0f);  // panel box inset within its window
+
+  // current window size, updated on resize events (e.g. F11 fullscreen)
+  glm::ivec2 window_size = RESOLUTION;
+  bool fullscreen = false;
+
+  // panel visibility, toggled with F1/F2/F3, all visible by default
+  bool show_pfd = true, show_radar = true, show_map = true;
+  // show/hide animation state, 0 = hidden, 1 = shown
+  float pfd_anim = 1.0f, radar_anim = 1.0f, map_anim = 1.0f;
+  // current on-screen box positions, updated every frame, used by the blur blits
+  ImVec2 pfd_box_cur   = instruments::add(ImVec2(0.0f, RESOLUTION.y - pfd_win_size.y), box_offset);
+  ImVec2 radar_box_cur = instruments::add(ImVec2(RESOLUTION.x - scope_win_size.x, RESOLUTION.y - scope_win_size.y),
+                                          box_offset);
+  ImVec2 map_box_cur   = instruments::add(ImVec2(RESOLUTION.x - scope_win_size.x,
+                                                 RESOLUTION.y - 2.0f * scope_win_size.y - 10.0f),
+                                          box_offset);
 
   // rebuild the player aircraft with a different model, keeping position and attitude
   auto switch_aircraft = [&](AircraftModel model) {
@@ -442,6 +540,15 @@ int main(void)
           controller.move_mouse(static_cast<float>(event.motion.xrel), static_cast<float>(event.motion.yrel));
           break;
         }
+        case SDL_WINDOWEVENT: {
+          // keep the viewport, projection and ui layout in sync with the window size
+          if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+            window_size = glm::ivec2(event.window.data1, event.window.data2);
+            renderer.set_size(window_size.x, window_size.y);
+            camera.set_aspect(static_cast<float>(window_size.x) / static_cast<float>(window_size.y));
+          }
+          break;
+        }
         case SDL_KEYDOWN: {
           switch (event.key.keysym.sym) {
             case SDLK_ESCAPE: {
@@ -463,6 +570,23 @@ int main(void)
 #if CLIPMAP
               clipmap.wireframe = !clipmap.wireframe;
 #endif
+              break;
+
+            case SDLK_F1:
+              show_pfd = !show_pfd;
+              break;
+            case SDLK_F2:
+              show_radar = !show_radar;
+              break;
+            case SDLK_F3:
+              show_map = !show_map;
+              break;
+            case SDLK_F11:
+              fullscreen = !fullscreen;
+              SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+              break;
+            case SDLK_F10:
+              view_mode = (view_mode + 1) % 3;
               break;
 
             default:
@@ -508,6 +632,39 @@ int main(void)
           }
           break;
         }
+        case SDL_CONTROLLERBUTTONDOWN: {
+          switch (event.cbutton.button) {
+            case SDL_CONTROLLER_BUTTON_START:
+              paused = !paused;
+              break;
+            case SDL_CONTROLLER_BUTTON_BACK:
+              orbit = !orbit;
+              SDL_ShowCursor(orbit ? SDL_FALSE : SDL_TRUE);
+              SDL_SetRelativeMouseMode(orbit ? SDL_TRUE : SDL_FALSE);
+              break;
+            default:
+              break;
+          }
+          break;
+        }
+        case SDL_CONTROLLERDEVICEADDED: {
+          if (gamepad == nullptr && SDL_IsGameController(event.cdevice.which)) {
+            gamepad = SDL_GameControllerOpen(event.cdevice.which);
+            if (gamepad != nullptr) {
+              std::cout << "gamepad connected: " << SDL_GameControllerName(gamepad) << std::endl;
+            }
+          }
+          break;
+        }
+        case SDL_CONTROLLERDEVICEREMOVED: {
+          if (gamepad != nullptr &&
+              SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad)) == event.cdevice.which) {
+            SDL_GameControllerClose(gamepad);
+            gamepad = nullptr;
+            std::cout << "gamepad disconnected" << std::endl;
+          }
+          break;
+        }
       }
     }
 
@@ -536,10 +693,17 @@ int main(void)
     float altitude       = ac.get_altitude();
     float vertical_speed = ac.velocity.y;
 
+    // panel slots for the current window size: corner anchored, fixed pixel sizes,
+    // so fullscreen just moves the panels to the corners instead of stretching them
+    const ImVec2 status_bar_pos((window_size.x - status_bar_size.x) * 0.5f, 15.0f);
+    const ImVec2 pfd_slot(0.0f, window_size.y - pfd_win_size.y);
+    const ImVec2 radar_slot(window_size.x - scope_win_size.x, window_size.y - scope_win_size.y);
+    const ImVec2 map_slot(radar_slot.x, radar_slot.y - scope_win_size.y - 10.0f);
+
     // frosted glass status bar at the top center of the window
     {
-      const ImVec2 bar_size(760.0f, 62.0f);
-      const ImVec2 bar_pos((RESOLUTION.x - bar_size.x) * 0.5f, 15.0f);
+      const ImVec2 bar_size = status_bar_size;
+      const ImVec2 bar_pos  = status_bar_pos;
 
       ImGui::SetNextWindowPos(bar_pos);
       ImGui::SetNextWindowSize(bar_size);
@@ -579,7 +743,7 @@ int main(void)
 
     // settings button in the top right corner
     {
-      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 110.0f, 10.0f));
+      ImGui::SetNextWindowPos(ImVec2(window_size.x - 110.0f, 10.0f));
       ImGui::SetNextWindowSize(ImVec2(100.0f, 40.0f));
       ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.045f, 0.05f, 0.60f));
       ImGui::Begin("SettingsButton", nullptr,
@@ -593,28 +757,85 @@ int main(void)
       ImGui::PopStyleColor();
     }
 
-    // floating settings window
+    // floating settings window, one collapsible panel per settings group
     if (show_settings) {
-      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 320.0f, 60.0f), ImGuiCond_FirstUseEver);
-      ImGui::SetNextWindowSize(ImVec2(240.0f, 0.0f));  // auto height
+      ImGui::SetNextWindowPos(ImVec2(window_size.x - 320.0f, 60.0f), ImGuiCond_FirstUseEver);
+      ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f));  // auto height
       ImGui::PushFont(instrument_style.font);
       ImGui::Begin("Settings", &show_settings);
-      ImGui::Text("Aircraft");
-      ImGui::Spacing();
-      if (ImGui::RadioButton("Fast Jet", aircraft_model == MODEL_FAST_JET)) {
-        switch_aircraft(MODEL_FAST_JET);
+      if (ImGui::CollapsingHeader("Aircraft", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::RadioButton("Fast Jet", aircraft_model == MODEL_FAST_JET)) {
+          switch_aircraft(MODEL_FAST_JET);
+        }
+        if (ImGui::RadioButton("Cessna", aircraft_model == MODEL_CESSNA)) {
+          switch_aircraft(MODEL_CESSNA);
+        }
       }
-      if (ImGui::RadioButton("Cessna", aircraft_model == MODEL_CESSNA)) {
-        switch_aircraft(MODEL_CESSNA);
+      if (ImGui::CollapsingHeader("Warnings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Pull up below (AGL)", &warning_altitude, 50.0f, 3500.0f, "%.0f m");
+      }
+      if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Frosted glass panels", &glass_panels);
       }
       ImGui::End();
       ImGui::PopFont();
     }
 
+    // pull-up warning, flashing red in the center of the window.
+    // triggers on height above ground, the terrain itself is several hundred meters high
+    float agl = altitude - terrain_height(ac.position.x, ac.position.z);
+    if (agl < warning_altitude && std::fmod(flight_time, 0.8f) < 0.5f) {
+      ImGui::SetNextWindowPos(ImVec2(0, 0));
+      ImGui::SetNextWindowSize(ImVec2(window_size.x, window_size.y));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+      ImGui::Begin("Warning", nullptr, window_flags);
+
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      const ImVec2 center(window_size.x * 0.5f, window_size.y * 0.3f);
+      instruments::text_centered(dl, instrument_style.font_big, 64.0f, instruments::add(center, ImVec2(3.0f, 3.0f)),
+                                 IM_COL32(0, 0, 0, 255), "PULL UP");
+      instruments::text_centered(dl, instrument_style.font_big, 64.0f, center, IM_COL32(255, 60, 60, 255),
+                                 "PULL UP");
+
+      ImGui::End();
+      ImGui::PopStyleColor();
+    }
+
+    // show/hide animation for the panels, ease-out cubic slide
+    const float anim_step = 3.5f * dt;
+    pfd_anim   = glm::clamp(pfd_anim + (show_pfd ? anim_step : -anim_step), 0.0f, 1.0f);
+    radar_anim = glm::clamp(radar_anim + (show_radar ? anim_step : -anim_step), 0.0f, 1.0f);
+    map_anim   = glm::clamp(map_anim + (show_map ? anim_step : -anim_step), 0.0f, 1.0f);
+    auto ease_out = [](float t) { return 1.0f - std::pow(1.0f - t, 3.0f); };
+    auto lerp     = [](float a, float b, float t) { return a + (b - a) * t; };
+
+    // hidden panels slide off screen: the pfd to the left, radar and map to the right.
+    // the map slides down into the radar slot when the radar is hidden
+    const ImVec2 pfd_win_pos(lerp(-pfd_win_size.x - 5.0f, pfd_slot.x, ease_out(pfd_anim)), pfd_slot.y);
+    const ImVec2 radar_win_pos(lerp(window_size.x + 5.0f, radar_slot.x, ease_out(radar_anim)), radar_slot.y);
+    const ImVec2 map_win_pos(lerp(window_size.x + 5.0f, map_slot.x, ease_out(map_anim)),
+                             lerp(map_slot.y, radar_slot.y, ease_out(1.0f - radar_anim)));
+    pfd_box_cur   = instruments::add(pfd_win_pos, box_offset);
+    radar_box_cur = instruments::add(radar_win_pos, box_offset);
+    map_box_cur   = instruments::add(map_win_pos, box_offset);
+
+    // panel box background: solid dark, or frosted glass when enabled in the settings
+    auto draw_panel_bg = [&](ImDrawList* dl, const ImVec2& bmin, const ImVec2& bmax, GLuint blur_tex) {
+      if (glass_panels) {
+        // heavily downscaled copy of the framebuffer behind the box, stretched back = blur
+        dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(blur_tex)), bmin, bmax,
+                            ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), IM_COL32(255, 255, 255, 255), 8.0f);
+        dl->AddRectFilled(bmin, bmax, IM_COL32(8, 9, 11, 130), 8.0f);
+      } else {
+        dl->AddRectFilled(bmin, bmax, IM_COL32(8, 9, 11, 245), 8.0f);
+      }
+      dl->AddRect(bmin, bmax, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+    };
+
     // instrument panel: just the PFD box in the bottom left corner of the window
-    {
-      ImGui::SetNextWindowPos(ImVec2(0, RESOLUTION.y - 415.0f));
-      ImGui::SetNextWindowSize(ImVec2(500, 415));
+    if (pfd_anim > 0.0f) {
+      ImGui::SetNextWindowPos(pfd_win_pos);
+      ImGui::SetNextWindowSize(pfd_win_size);
       ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
       ImGui::Begin("Instruments", nullptr, window_flags);
 
@@ -622,10 +843,9 @@ int main(void)
       const ImVec2 wp = ImGui::GetWindowPos();
 
       // the pfd box
-      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
-      const ImVec2 box_max(wp.x + 490.0f, wp.y + 405.0f);
-      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
-      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+      const ImVec2 box_min = pfd_box_cur;
+      const ImVec2 box_max = instruments::add(pfd_box_cur, pfd_box_size);
+      draw_panel_bg(dl, box_min, box_max, pfd_blur_tex);
 
       // flight mode annunciator row (static, for the look)
       instruments::draw_fma(dl, instrument_style, ImVec2(box_min.x + 6.0f, box_min.y + 4.0f),
@@ -656,8 +876,10 @@ int main(void)
 
       ImGui::End();
       ImGui::PopStyleColor();
+    }
 
-      // textual readouts, top left corner
+    // textual readouts, top left corner (independent of the pfd panel)
+    {
       ImGui::SetNextWindowPos(ImVec2(10, 10));
       ImGui::SetNextWindowSize(ImVec2(190, 175));
       ImGui::SetNextWindowBgAlpha(0.35f);
@@ -675,19 +897,18 @@ int main(void)
     }
 
     // radar scope in the bottom right corner
-    {
-      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 330.0f, RESOLUTION.y - 330.0f));
-      ImGui::SetNextWindowSize(ImVec2(330, 330));
+    if (radar_anim > 0.0f) {
+      ImGui::SetNextWindowPos(radar_win_pos);
+      ImGui::SetNextWindowSize(scope_win_size);
       ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
       ImGui::Begin("Radar", nullptr, window_flags);
 
       ImDrawList* dl  = ImGui::GetWindowDrawList();
       const ImVec2 wp = ImGui::GetWindowPos();
 
-      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
-      const ImVec2 box_max(wp.x + 320.0f, wp.y + 320.0f);
-      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
-      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+      const ImVec2 box_min = radar_box_cur;
+      const ImVec2 box_max = instruments::add(radar_box_cur, scope_box_size);
+      draw_panel_bg(dl, box_min, box_max, radar_blur_tex);
 
       instruments::draw_radar(dl, instrument_style, ImVec2(wp.x + 165.0f, wp.y + 165.0f), 115.0f, flight_time,
                               map_texture.id, ac.position, heading_deg, map_terrain_size);
@@ -705,20 +926,18 @@ int main(void)
       ImGui::PopStyleColor();
     }
 
-    // map display above the radar
-    {
-      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 330.0f, RESOLUTION.y - 670.0f));
-      ImGui::SetNextWindowSize(ImVec2(330, 330));
+    // map display above the radar, slides down into the radar slot when the radar is hidden
+    if (map_anim > 0.0f) {
+      ImGui::SetNextWindowPos(map_win_pos);
+      ImGui::SetNextWindowSize(scope_win_size);
       ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
       ImGui::Begin("Map", nullptr, window_flags);
 
-      ImDrawList* dl  = ImGui::GetWindowDrawList();
-      const ImVec2 wp = ImGui::GetWindowPos();
+      ImDrawList* dl = ImGui::GetWindowDrawList();
 
-      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
-      const ImVec2 box_max(wp.x + 320.0f, wp.y + 320.0f);
-      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
-      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+      const ImVec2 box_min = map_box_cur;
+      const ImVec2 box_max = instruments::add(map_box_cur, scope_box_size);
+      draw_panel_bg(dl, box_min, box_max, map_blur_tex);
 
       instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture.id, player.airplane.position,
                             heading_deg, map_terrain_size);
@@ -732,7 +951,7 @@ int main(void)
     auto attitude = glm::degrees(player.airplane.get_euler_angles());
 
     ImVec2 size(140, 140);
-    ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - size.y - 10.0f, RESOLUTION.y - size.y - 10.0f));
+    ImGui::SetNextWindowPos(ImVec2(window_size.x - size.y - 10.0f, window_size.y - size.y - 10.0f));
     ImGui::SetNextWindowSize(size);
     ImGui::SetNextWindowBgAlpha(0.35f);
     ImGui::Begin("Debug", nullptr, window_flags);
@@ -747,6 +966,9 @@ int main(void)
 #endif
 
     get_keyboard_state(joystick, dt);
+    if (gamepad != nullptr) {
+      poll_gamepad(gamepad, joystick, dt);
+    }
 
     player.airplane.joystick = glm::vec4(joystick.aileron, joystick.rudder, joystick.elevator, joystick.trim);
 #if USE_PID
@@ -758,6 +980,9 @@ int main(void)
     }
 #endif
     player.airplane.throttle = joystick.throttle;
+
+    // engine sound follows the throttle, always audible at idle
+    audio_player.set_volume(engine_sound, 0.25f + 0.75f * joystick.throttle);
 
 #if NPC_AIRCRAFT
     target_marker.visible = glm::length(camera.get_world_position() - npc.airplane.position) > 500.0f;
@@ -780,25 +1005,49 @@ int main(void)
     } else if (!paused) {
 #if SMOOTH_CAMERA
       auto& rb = player.airplane;
-      camera.set_position(glm::mix(camera.get_position(), rb.position + rb.up() * 4.5f, dt * 0.035f * rb.get_speed()));
-      camera.set_rotation_quat(
-          glm::mix(camera.get_rotation_quat(), camera_transform.get_world_rotation_quat(), dt * 5.0f));
+      if (view_mode == 2) {
+        // rigidly mounted above and slightly behind the main wing, looking forward over
+        // the nose: the whole wing is visible, the tail stays behind the camera.
+        // no position smoothing here: the chase lag (~28m at speed) would leave
+        // the camera behind the tail
+        camera.set_position(rb.position + rb.up() * 4.0f - rb.forward() * 9.0f);
+        camera.look_at(rb.position + rb.forward() * 30.0f - rb.up() * 6.0f);
+      } else {
+        glm::vec3 view_pos = (view_mode == 1) ? rb.position + rb.right() * 28.0f + rb.up() * 3.0f
+                                              : rb.position + rb.up() * 4.5f;
+        camera.set_position(glm::mix(camera.get_position(), view_pos, dt * 0.035f * rb.get_speed()));
+        if (view_mode == 1) {
+          camera.look_at(rb.position);
+        } else {
+          camera.set_rotation_quat(
+              glm::mix(camera.get_rotation_quat(), camera_transform.get_world_rotation_quat(), dt * 5.0f));
+        }
+      }
 #else
       camera.set_transform(glm::vec3(0.0f), glm::vec3(0.0f));
 #endif
-      cross.visible = fpm.visible = true;
+      cross.visible = fpm.visible = (view_mode == 0);  // hud markers only make sense in chase view
     }
     renderer.render(camera, scene);
 
-    // update the frosted glass texture with this frame's scene behind the status bar
+    // update the frosted glass textures with this frame's scene, each texture gets the
+    // framebuffer region behind its panel (gl coordinates, origin at bottom left)
     {
-      const float bar_w = 760.0f, bar_h = 62.0f;
-      const int x0 = static_cast<int>((RESOLUTION.x - bar_w) * 0.5f);
-      const int y0 = static_cast<int>(RESOLUTION.y - 15.0f - bar_h);  // gl coordinates, origin at bottom left
       glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
       glBindFramebuffer(GL_DRAW_FRAMEBUFFER, glass_fbo);
-      glBlitFramebuffer(x0, y0, x0 + static_cast<int>(bar_w), y0 + static_cast<int>(bar_h), 0, 0, glass_tex_size.x,
-                        glass_tex_size.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+      auto blit_behind = [&](const ImVec2& pos, const ImVec2& size, GLuint tex, const glm::ivec2& tex_size) {
+        const int x0 = static_cast<int>(pos.x);
+        const int y0 = static_cast<int>(window_size.y - pos.y - size.y);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glBlitFramebuffer(x0, y0, x0 + static_cast<int>(size.x), y0 + static_cast<int>(size.y), 0, 0, tex_size.x,
+                          tex_size.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+      };
+      blit_behind(status_bar_pos, status_bar_size, glass_tex.id, glass_tex_size);
+      if (glass_panels) {
+        if (pfd_anim > 0.0f) blit_behind(pfd_box_cur, pfd_box_size, pfd_blur_tex, pfd_blur_size);
+        if (radar_anim > 0.0f) blit_behind(radar_box_cur, scope_box_size, radar_blur_tex, scope_blur_size);
+        if (map_anim > 0.0f) blit_behind(map_box_cur, scope_box_size, map_blur_tex, scope_blur_size);
+      }
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
@@ -806,6 +1055,7 @@ int main(void)
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     SDL_GL_SwapWindow(window);
   }
+  audio_player.shutdown();
   return 0;
 }
 
@@ -858,5 +1108,41 @@ void get_keyboard_state(Joystick& joystick, phi::Seconds dt)
     joystick.trim = glm::clamp(joystick.trim - trim_speed, -1.0f, 1.0f);
   } else if (key_states[SDL_SCANCODE_M]) {
     joystick.trim = glm::clamp(joystick.trim + trim_speed, -1.0f, 1.0f);
+  }
+}
+
+inline float cube(float v) { return v * v * v; }
+
+// read the gamepad state each frame: left stick = pitch/roll, right stick = yaw,
+// triggers = thrust, dpad up/down = pitch trim
+void poll_gamepad(SDL_GameController* gamepad, Joystick& joystick, phi::Seconds dt)
+{
+  auto raw_axis = [&](SDL_GameControllerAxis axis) {
+    return SDL_GameControllerGetAxis(gamepad, axis) / 32767.0f;
+  };
+
+  // scale the value outside the deadzone to the full -1..1 range
+  const float deadzone = 0.12f;
+  auto axis = [&](SDL_GameControllerAxis a) {
+    float v = raw_axis(a);
+    if (std::abs(v) < deadzone) return 0.0f;
+    return (v - std::copysign(deadzone, v)) / (1.0f - deadzone);
+  };
+
+  // stick forward = nose down, stick right = roll right
+  joystick.aileron  = cube(-axis(SDL_CONTROLLER_AXIS_LEFTX));
+  joystick.elevator = cube(axis(SDL_CONTROLLER_AXIS_LEFTY));
+  joystick.rudder   = cube(axis(SDL_CONTROLLER_AXIS_RIGHTX));
+
+  // triggers are unsigned: right = more thrust, left = less
+  float right_trigger = (raw_axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) + 1.0f) * 0.5f;
+  float left_trigger  = (raw_axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) + 1.0f) * 0.5f;
+  joystick.throttle   = glm::clamp(joystick.throttle + (right_trigger - left_trigger) * dt * 0.5f, 0.0f, 1.0f);
+
+  const float trim_speed = 0.5f;
+  if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_UP)) {
+    joystick.trim = glm::clamp(joystick.trim + trim_speed * dt, -1.0f, 1.0f);
+  } else if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) {
+    joystick.trim = glm::clamp(joystick.trim - trim_speed * dt, -1.0f, 1.0f);
   }
 }

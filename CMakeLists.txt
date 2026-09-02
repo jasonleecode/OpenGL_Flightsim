@@ -10,6 +10,7 @@ find_package(SDL2 REQUIRED)
 add_executable(flightsim
     # Source files
     src/ai.h
+    src/audio.h
     src/terrain.h
     src/collider.h
     src/data.h
@@ -54,3 +55,11 @@ target_link_libraries(flightsim
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/assets DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/shaders DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+# sync assets and shaders on every build, so newly added files (e.g. sound
+# effects dropped into assets/audio) do not require a manual reconfigure
+add_custom_target(copy_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${CMAKE_CURRENT_BINARY_DIR}/assets
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${CMAKE_CURRENT_BINARY_DIR}/shaders
+)
+add_dependencies(flightsim copy_assets)
