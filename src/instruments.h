@@ -442,60 +442,106 @@ inline void draw_map(ImDrawList* dl, const Style& style, const ImVec2& box_min, 
   dl->AddCircle(ac, 10.0f, LIME, 24, 1.2f);
 }
 
-// radar scope with a rotating sweep and a phosphor afterglow trail
-inline void draw_radar(ImDrawList* dl, const Style& style, const ImVec2& center, float radius, float time)
+// small airplane silhouette, nose along angle
+static void draw_plane_icon(ImDrawList* dl, const ImVec2& pos, float size, float angle, ImU32 col)
 {
-  const ImU32 face = IM_COL32(4, 18, 10, 255);
-  const ImU32 grid = IM_COL32(40, 120, 70, 255);
+  const ImVec2 d = rot(ImVec2(0.0f, -1.0f), angle);  // nose direction
+  const ImVec2 s = rot(ImVec2(1.0f, 0.0f), angle);   // wing direction
+  dl->AddLine(sub(pos, mul(d, size)), add(pos, mul(d, size)), col, 1.5f);                       // fuselage
+  dl->AddLine(sub(add(pos, mul(d, size * 0.15f)), mul(s, size * 0.8f)),
+              add(add(pos, mul(d, size * 0.15f)), mul(s, size * 0.8f)), col, 1.5f);             // wings
+  dl->AddLine(sub(sub(pos, mul(d, size * 0.75f)), mul(s, size * 0.35f)),
+              add(sub(pos, mul(d, size * 0.75f)), mul(s, size * 0.35f)), col, 1.5f);            // tail
+}
+
+// military style radar scope: terrain background centered on the aircraft, numbered degree
+// ring, range rings, rotating sweep with a wide phosphor afterglow and airplane targets
+inline void draw_radar(ImDrawList* dl, const Style& style, const ImVec2& center, float radius, float time,
+                       unsigned int map_texture, const glm::vec3& aircraft_pos, float heading_deg,
+                       float terrain_size)
+{
+  const ImU32 face   = IM_COL32(3, 12, 7, 255);
+  const ImU32 grid   = IM_COL32(45, 150, 85, 255);
+  const ImU32 bright = IM_COL32(120, 255, 170, 255);
 
   const float sweep_speed = glm::radians(90.0f);  // one revolution every 4 seconds
   const float sweep       = std::fmod(time * sweep_speed, TWO_PI);
 
-  // face, range rings, crosshair and tick ring
   dl->AddCircleFilled(center, radius, face, 64);
-  for (float f : {0.33f, 0.66f, 1.0f}) {
-    dl->AddCircle(center, radius * f, grid, 48, 1.0f);
+
+  // terrain background, a +/- 35km window that follows the aircraft, tinted dark green
+  const float half_range = 0.35f;  // uv units, terrain_size wide
+  const float uc = aircraft_pos.x / terrain_size + 0.5f;
+  const float vc = aircraft_pos.z / terrain_size + 0.5f;
+  dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(map_texture)), sub(center, ImVec2(radius, radius)),
+                      add(center, ImVec2(radius, radius)), ImVec2(uc - half_range, vc - half_range),
+                      ImVec2(uc + half_range, vc + half_range), IM_COL32(0, 200, 100, 140), radius);
+
+  // range rings and crosshair
+  for (float f : {0.25f, 0.5f, 0.75f, 1.0f}) {
+    dl->AddCircle(center, radius * f, grid, 64, 1.0f);
   }
   dl->AddLine(add(center, ImVec2(-radius, 0.0f)), add(center, ImVec2(radius, 0.0f)), grid, 1.0f);
   dl->AddLine(add(center, ImVec2(0.0f, -radius)), add(center, ImVec2(0.0f, radius)), grid, 1.0f);
-  for (int a = 0; a < 360; a += 30) {
-    ImVec2 d = rot(ImVec2(0.0f, -1.0f), glm::radians(static_cast<float>(a)));
-    dl->AddLine(add(center, mul(d, radius - 6.0f)), add(center, mul(d, radius)), grid, 1.0f);
-  }
 
-  // phosphor afterglow: a fan of wedges trailing the sweep with fading alpha
-  const int N        = 48;
-  const float span   = glm::radians(100.0f);
-  const float step   = span / N;
+  // phosphor afterglow: a wide fan of wedges trailing the sweep with fading alpha
+  const int N      = 60;
+  const float span = glm::radians(120.0f);
+  const float step = span / N;
   const ImVec2 ex(1.0f, 0.0f);
   for (int i = 0; i < N; i++) {
-    float a0    = sweep - i * step;
-    float a1    = a0 - step * 1.2f;  // slight overlap to hide the seams
-    float fade  = 1.0f - static_cast<float>(i) / N;
-    int alpha   = static_cast<int>(110.0f * fade * fade);
+    float a0   = sweep - i * step;
+    float a1   = a0 - step;
+    float fade = 1.0f - static_cast<float>(i) / N;
+    int alpha  = static_cast<int>(150.0f * fade * fade);
     if (alpha <= 0) continue;
     const ImVec2 wedge[3] = {center, add(center, mul(rot(ex, a0), radius)),
                              add(center, mul(rot(ex, a1), radius))};
     dl->AddConvexPolyFilled(wedge, 3, IM_COL32(0, 255, 130, alpha));
   }
 
-  // a few static targets, lit up when the sweep passes over them
+  // sweep leading edge
+  dl->AddLine(center, add(center, mul(rot(ex, sweep), radius)), bright, 2.0f);
+  dl->AddCircleFilled(center, 2.5f, bright, 12);
+
+  // airplane targets at fixed world positions, lit up when the sweep passes over them
   static const struct {
-    float ang, dist, size;
-  } blips[] = {
-      {0.6f, 0.45f, 3.0f}, {1.9f, 0.70f, 2.5f}, {2.8f, 0.30f, 3.5f}, {4.0f, 0.80f, 2.5f}, {5.4f, 0.55f, 3.0f},
+    float x_km, z_km, heading;
+  } targets[] = {
+      {12.0f, -8.0f, 0.8f},  {-25.0f, 15.0f, 2.2f}, {30.0f, 22.0f, 4.1f}, {-10.0f, -30.0f, 5.3f},
+      {5.0f, 33.0f, 1.5f},   {-32.0f, -6.0f, 3.6f}, {18.0f, 3.0f, 2.8f},  {-18.0f, -22.0f, 0.2f},
+      {26.0f, -18.0f, 5.9f}, {-5.0f, 24.0f, 4.7f},
   };
-  for (const auto& b : blips) {
-    float rel = std::fmod(sweep - b.ang + TWO_PI, TWO_PI);  // angle since the sweep passed
-    int alpha = static_cast<int>(255.0f * std::exp(-rel * 1.5f));
-    if (alpha <= 8) continue;
-    ImVec2 pos = add(center, mul(rot(ex, b.ang), b.dist * radius));
-    dl->AddCircleFilled(pos, b.size, IM_COL32(120, 255, 170, alpha), 12);
+  for (const auto& t : targets) {
+    // world -> scope position, same mapping as the terrain background
+    float sx = (t.x_km * 1000.0f / terrain_size + 0.5f - uc) / half_range;
+    float sz = (t.z_km * 1000.0f / terrain_size + 0.5f - vc) / half_range;
+    if (sx * sx + sz * sz > 0.95f) continue;  // outside the scope
+
+    ImVec2 pos(center.x + sx * radius, center.y + sz * radius);
+    // sweep angle measured like the screen angle: 0 = +x, increasing clockwise
+    float ang = std::atan2(sz, sx);
+    float rel = std::fmod(sweep - ang + TWO_PI, TWO_PI);  // angle since the sweep passed
+    // always dimly visible, flashing bright right after the sweep passes
+    int alpha = 70 + static_cast<int>(185.0f * std::exp(-rel * 1.2f));
+    draw_plane_icon(dl, pos, 9.0f, t.heading, IM_COL32(120, 255, 170, alpha));
   }
 
-  // sweep leading edge
-  dl->AddLine(center, add(center, mul(rot(ex, sweep), radius)), IM_COL32(150, 255, 180, 255), 2.0f);
-  dl->AddCircleFilled(center, 2.5f, IM_COL32(150, 255, 180, 255), 12);
+  // own aircraft marker in the center, pointing along the heading
+  draw_plane_icon(dl, center, 10.0f, glm::radians(heading_deg + 90.0f), bright);
+
+  // numbered degree ring around the scope
+  for (int a = 0; a < 360; a += 5) {
+    ImVec2 d   = rot(ImVec2(0.0f, -1.0f), glm::radians(static_cast<float>(a)));
+    bool major = (a % 10 == 0);
+    dl->AddLine(add(center, mul(d, radius + 3.0f)), add(center, mul(d, radius + (major ? 10.0f : 6.0f))), grid,
+                1.0f);
+    if (major && a != 0) {
+      char buf[4] = {};
+      snprintf(buf, sizeof(buf), "%d", a);
+      text_centered(dl, style.font, style.font_size - 4.0f, add(center, mul(d, radius + 20.0f)), bright, buf);
+    }
+  }
 }
 
 };  // namespace instruments

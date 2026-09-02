@@ -689,7 +689,17 @@ int main(void)
       dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
       dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
 
-      instruments::draw_radar(dl, instrument_style, ImVec2(wp.x + 165.0f, wp.y + 165.0f), 135.0f, flight_time);
+      instruments::draw_radar(dl, instrument_style, ImVec2(wp.x + 165.0f, wp.y + 165.0f), 115.0f, flight_time,
+                              map_texture.id, ac.position, heading_deg, map_terrain_size);
+
+      // coordinates, top left corner of the box
+      char coord[32];
+      snprintf(coord, sizeof(coord), "X %07.1f", ac.position.x);
+      instruments::draw_text(dl, instrument_style.font, 11.0f, ImVec2(box_min.x + 8.0f, box_min.y + 6.0f),
+                             IM_COL32(120, 255, 170, 200), coord);
+      snprintf(coord, sizeof(coord), "Z %07.1f", ac.position.z);
+      instruments::draw_text(dl, instrument_style.font, 11.0f, ImVec2(box_min.x + 8.0f, box_min.y + 20.0f),
+                             IM_COL32(120, 255, 170, 200), coord);
 
       ImGui::End();
       ImGui::PopStyleColor();
