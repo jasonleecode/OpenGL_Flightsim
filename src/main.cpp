@@ -334,17 +334,20 @@ int main(void)
   scene.add(&clipmap);
 #endif
 
-  // available maps: display name, data directory and the world area covered by its heightmap.
+  // available maps: display name, data directory, the world area covered by its heightmap
+  // and the upper left web mercator tile the 4x4 tile dataset starts at.
   // every dataset needs heightmap.png, normalmap.png and texture.png
   struct MapInfo {
     const char* name;
     const char* path;
     float terrain_size;
+    int zoom, xtile, ytile;
   };
   const std::vector<MapInfo> maps = {
-      {"Vorarlberg", "assets/textures/terrain/data/10/536/356/", MAX_TILE_SIZE / 2.0f},
-      {"Vienna", "assets/textures/terrain/data/10/557/354/", MAX_TILE_SIZE / 2.0f},
-      {"Bodensee", "assets/textures/terrain/data/9/268/178/", MAX_TILE_SIZE},
+      {"Vorarlberg", "assets/textures/terrain/data/10/536/356/", MAX_TILE_SIZE / 2.0f, 10, 536, 356},
+      {"Vienna", "assets/textures/terrain/data/10/557/354/", MAX_TILE_SIZE / 2.0f, 10, 557, 354},
+      {"Bodensee", "assets/textures/terrain/data/9/268/178/", MAX_TILE_SIZE, 9, 268, 178},
+      {"Beijing", "assets/textures/terrain/data/10/842/387/", MAX_TILE_SIZE / 2.0f, 10, 842, 387},
   };
   int current_map = 0;
 
@@ -988,6 +991,24 @@ int main(void)
 
       instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture->id, player.airplane.position,
                             heading_deg, map_terrain_size, map_zoom);
+
+      // aircraft lat/lon in the top left corner of the box: web mercator conversion from
+      // the world position through the dataset's tile coordinates (4x4 tiles per dataset)
+      {
+        const auto& m   = maps[current_map];
+        const float n   = static_cast<float>(1 << m.zoom);
+        const float tx  = m.xtile + glm::clamp(ac.position.x / map_terrain_size + 0.5f, 0.0f, 1.0f) * 4.0f;
+        const float ty  = m.ytile + glm::clamp(ac.position.z / map_terrain_size + 0.5f, 0.0f, 1.0f) * 4.0f;
+        const float lon = tx / n * 360.0f - 180.0f;
+        const float lat = glm::degrees(std::atan(std::sinh(3.14159265f * (1.0f - 2.0f * ty / n))));
+        char coord[32];
+        snprintf(coord, sizeof(coord), "%.4f%c", std::fabs(lat), lat >= 0.0f ? 'N' : 'S');
+        instruments::draw_text(dl, instrument_style.font, 11.0f, ImVec2(box_min.x + 8.0f, box_min.y + 6.0f),
+                               IM_COL32(120, 255, 170, 200), coord);
+        snprintf(coord, sizeof(coord), "%.4f%c", std::fabs(lon), lon >= 0.0f ? 'E' : 'W');
+        instruments::draw_text(dl, instrument_style.font, 11.0f, ImVec2(box_min.x + 8.0f, box_min.y + 20.0f),
+                               IM_COL32(120, 255, 170, 200), coord);
+      }
 
       ImGui::End();
       ImGui::PopStyleColor();
