@@ -7,7 +7,7 @@
 
 #include "../lib/imgui/imgui.h"
 
-// Flight instrument widgets drawn with ImGui draw lists.
+// Flight instrument widgets drawn with ImGui draw lists, replicating a modern PFD.
 // Screen coordinates: the y axis points down.
 namespace instruments
 {
@@ -21,10 +21,11 @@ struct Style {
   float font_big_size = 19.0f;
 };
 
-const ImU32 WHITE  = IM_COL32(235, 240, 245, 255);
-const ImU32 YELLOW = IM_COL32(255, 200, 0, 255);
-const ImU32 CYAN   = IM_COL32(0, 220, 220, 255);
-const ImU32 DIM    = IM_COL32(150, 160, 170, 255);
+const ImU32 WHITE = IM_COL32(235, 240, 245, 255);
+const ImU32 GREEN = IM_COL32(30, 230, 130, 255);  // digital readouts and pointers
+const ImU32 LIME  = IM_COL32(190, 255, 80, 255);  // fixed aircraft symbols
+const ImU32 DIM   = IM_COL32(150, 160, 170, 255);
+const ImU32 TAPE  = IM_COL32(80, 83, 90, 235);    // tape background
 
 static inline ImVec2 add(const ImVec2& a, const ImVec2& b) { return ImVec2(a.x + b.x, a.y + b.y); }
 static inline ImVec2 sub(const ImVec2& a, const ImVec2& b) { return ImVec2(a.x - b.x, a.y - b.y); }
@@ -38,25 +39,39 @@ static inline ImVec2 rot(const ImVec2& v, float angle)
   return ImVec2(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 
+static inline ImVec2 text_size(ImFont* font, float size, const char* text)
+{
+  return font ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, text) : ImGui::CalcTextSize(text);
+}
+
+static inline void draw_text(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 col,
+                             const char* text)
+{
+  if (font) {
+    dl->AddText(font, size, pos, col, text);
+  } else {
+    dl->AddText(pos, col, text);
+  }
+}
+
 // draw text centered at pos
 static inline void text_centered(ImDrawList* dl, ImFont* font, float size, const ImVec2& pos, ImU32 col,
                                  const char* text)
 {
-  ImVec2 ts = font ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, text) : ImGui::CalcTextSize(text);
-  if (font) {
-    dl->AddText(font, size, ImVec2(pos.x - ts.x * 0.5f, pos.y - ts.y * 0.5f), col, text);
-  } else {
-    dl->AddText(ImVec2(pos.x - ts.x * 0.5f, pos.y - ts.y * 0.5f), col, text);
-  }
+  ImVec2 ts = text_size(font, size, text);
+  draw_text(dl, font, size, ImVec2(pos.x - ts.x * 0.5f, pos.y - ts.y * 0.5f), col, text);
 }
 
-// dark dial face with a bezel ring
-static void draw_gauge_face(ImDrawList* dl, const ImVec2& c, float r)
+// digital readout box with centered text
+static inline void readout_box(ImDrawList* dl, const Style& style, const ImVec2& center, const char* text, ImU32 col)
 {
-  dl->AddCircleFilled(c, r + 7.0f, IM_COL32(28, 30, 34, 255), 64);
-  dl->AddCircle(c, r + 7.0f, IM_COL32(95, 100, 110, 255), 64, 1.5f);
-  dl->AddCircle(c, r + 3.5f, IM_COL32(55, 58, 64, 255), 64, 1.0f);
-  dl->AddCircleFilled(c, r, IM_COL32(10, 12, 16, 255), 64);
+  ImVec2 ts = text_size(style.font_big, style.font_big_size, text);
+  ImVec2 box_min(center.x - ts.x * 0.5f - 8.0f, center.y - ts.y * 0.5f - 4.0f);
+  ImVec2 box_max(center.x + ts.x * 0.5f + 8.0f, center.y + ts.y * 0.5f + 4.0f);
+  dl->AddRectFilled(box_min, box_max, IM_COL32(0, 0, 0, 235), 3.0f);
+  dl->AddRect(box_min, box_max, col, 3.0f, 0, 1.5f);
+  draw_text(dl, style.font_big, style.font_big_size, ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.5f), col,
+            text);
 }
 
 // fill the part of the disk (c, r) where dot(x - p, n) <= 0, n must be normalized
@@ -87,7 +102,7 @@ static void fill_disk_halfplane(ImDrawList* dl, const ImVec2& c, float r, const 
 
   const int SEG = 40;
   ImVec2 pts[SEG + 2];
-  int npts  = 0;
+  int npts    = 0;
   pts[npts++] = i1;
   for (int i = 1; i < SEG; i++) {
     float a     = a1 + da * static_cast<float>(i) / static_cast<float>(SEG);
@@ -112,7 +127,11 @@ static void line_inside_disk(ImDrawList* dl, const ImVec2& a, const ImVec2& b, c
   if (disc > 0.0f) {
     float s  = std::sqrt(disc);
     float ta = (-Bq - s) / (2.0f * A), tb = (-Bq + s) / (2.0f * A);
-    if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+    if (ta > tb) {
+      float tmp = ta;
+      ta        = tb;
+      tb        = tmp;
+    }
     t0 = (ta > t0) ? ta : t0;
     t1 = (tb < t1) ? tb : t1;
   } else if (C > 0.0f) {
@@ -126,8 +145,8 @@ static void line_inside_disk(ImDrawList* dl, const ImVec2& a, const ImVec2& b, c
 inline void draw_attitude_indicator(ImDrawList* dl, const Style& style, const ImVec2& center, float radius,
                                     float pitch_deg, float roll_deg)
 {
-  const ImU32 sky_col    = IM_COL32(45, 125, 205, 255);
-  const ImU32 ground_col = IM_COL32(130, 85, 40, 255);
+  const ImU32 sky_col    = IM_COL32(60, 140, 210, 255);
+  const ImU32 ground_col = IM_COL32(145, 92, 42, 255);
 
   const float px_per_deg = radius / 45.0f;
   const float angle      = -glm::radians(roll_deg);  // the horizon appears to roll opposite to the aircraft
@@ -139,9 +158,13 @@ inline void draw_attitude_indicator(ImDrawList* dl, const Style& style, const Im
   // point on the horizon line, shifted down when pitching up
   const ImVec2 p = add(center, rot(ImVec2(0.0f, pitch_deg * px_per_deg), angle));
 
-  // bezel
-  dl->AddCircleFilled(center, radius + 7.0f, IM_COL32(28, 30, 34, 255), 64);
-  dl->AddCircle(center, radius + 7.0f, IM_COL32(95, 100, 110, 255), 64, 1.5f);
+  // fixed tick ring around the ball
+  for (int a = 0; a < 360; a += 10) {
+    ImVec2 d   = rot(ImVec2(0.0f, -1.0f), glm::radians(static_cast<float>(a)));
+    bool major = (a % 30 == 0);
+    dl->AddLine(add(center, mul(d, radius + 3.0f)), add(center, mul(d, radius + (major ? 12.0f : 7.0f))), WHITE,
+                1.2f);
+  }
 
   // the ball
   dl->AddCircleFilled(center, radius, sky_col, 64);
@@ -177,88 +200,37 @@ inline void draw_attitude_indicator(ImDrawList* dl, const Style& style, const Im
   // fixed roll pointer at the top
   const ImVec2 tri[3] = {add(center, ImVec2(-7.0f, -radius + 3.0f)), add(center, ImVec2(7.0f, -radius + 3.0f)),
                          add(center, ImVec2(0.0f, -radius + 17.0f))};
-  dl->AddConvexPolyFilled(tri, 3, YELLOW);
+  dl->AddConvexPolyFilled(tri, 3, LIME);
 
-  // fixed aircraft symbol
-  const float y0 = 0.0f;
-  dl->AddLine(add(center, ImVec2(-radius * 0.42f, y0)), add(center, ImVec2(-radius * 0.14f, y0)), YELLOW, 3.5f);
-  dl->AddLine(add(center, ImVec2(-radius * 0.14f, y0)), add(center, ImVec2(-radius * 0.14f, y0 + radius * 0.09f)),
-              YELLOW, 3.5f);
-  dl->AddLine(add(center, ImVec2(radius * 0.14f, y0)), add(center, ImVec2(radius * 0.42f, y0)), YELLOW, 3.5f);
-  dl->AddLine(add(center, ImVec2(radius * 0.14f, y0)), add(center, ImVec2(radius * 0.14f, y0 + radius * 0.09f)),
-              YELLOW, 3.5f);
-  dl->AddCircleFilled(center, 3.0f, YELLOW, 12);
-}
-
-// compass card, heading in degrees (0..360, increasing with right turns)
-inline void draw_heading_indicator(ImDrawList* dl, const Style& style, const ImVec2& center, float radius,
-                                   float heading_deg)
-{
-  draw_gauge_face(dl, center, radius);
-
-  for (int a = 0; a < 360; a += 10) {
-    float rel      = glm::radians(static_cast<float>(a) - heading_deg);
-    ImVec2 d       = rot(ImVec2(0.0f, -1.0f), rel);
-    bool cardinal  = (a % 90 == 0);
-    bool labeled   = (a % 30 == 0);
-    float tick_len = cardinal ? 17.0f : (labeled ? 13.0f : 7.0f);
-    dl->AddLine(add(center, mul(d, radius - 3.0f)), add(center, mul(d, radius - 3.0f - tick_len)),
-                (a == 0) ? IM_COL32(255, 80, 80, 255) : WHITE, labeled ? 2.0f : 1.0f);
-
-    if (labeled) {
-      char buf[4] = {};
-      if (cardinal) {
-        const char* letters = "NESW";
-        snprintf(buf, sizeof(buf), "%c", letters[a / 90]);
-      } else {
-        snprintf(buf, sizeof(buf), "%d", a / 10);
-      }
-      text_centered(dl, style.font, style.font_size, add(center, mul(d, radius - 32.0f)),
-                    (a == 0) ? IM_COL32(255, 80, 80, 255) : WHITE, buf);
-    }
+  // fixed side wedges at the horizon line
+  for (float side : {-1.0f, 1.0f}) {
+    ImVec2 w = add(center, ImVec2(side * (radius + 16.0f), 0.0f));
+    const ImVec2 wedge[3] = {w, add(w, ImVec2(-side * 9.0f, -6.0f)), add(w, ImVec2(-side * 9.0f, 6.0f))};
+    dl->AddConvexPolyFilled(wedge, 3, WHITE);
   }
 
-  // fixed lubber line at the top
-  const ImVec2 tri[3] = {add(center, ImVec2(-6.0f, -radius + 2.0f)), add(center, ImVec2(6.0f, -radius + 2.0f)),
-                         add(center, ImVec2(0.0f, -radius + 15.0f))};
-  dl->AddConvexPolyFilled(tri, 3, YELLOW);
-
-  // fixed aircraft symbol in the middle
-  dl->AddCircleFilled(center, 3.0f, YELLOW, 12);
-  dl->AddLine(add(center, ImVec2(-radius * 0.22f, 0.0f)), add(center, ImVec2(radius * 0.22f, 0.0f)), YELLOW, 2.5f);
-  dl->AddLine(add(center, ImVec2(0.0f, -radius * 0.22f)), add(center, ImVec2(0.0f, radius * 0.16f)), YELLOW, 2.5f);
-
-  // digital heading readout at the bottom
-  char buf[8] = {};
-  int hdg     = ((static_cast<int>(std::lround(heading_deg)) % 360) + 360) % 360;
-  snprintf(buf, sizeof(buf), "%03d", hdg);
-  ImVec2 ts = style.font_big ? style.font_big->CalcTextSizeA(style.font_big_size, FLT_MAX, 0.0f, buf)
-                             : ImGui::CalcTextSize(buf);
-  ImVec2 bc(center.x, center.y + radius * 0.52f);
-  ImVec2 box_min(bc.x - ts.x * 0.5f - 8.0f, bc.y - ts.y * 0.5f - 4.0f);
-  ImVec2 box_max(bc.x + ts.x * 0.5f + 8.0f, bc.y + ts.y * 0.5f + 4.0f);
-  dl->AddRectFilled(box_min, box_max, IM_COL32(0, 0, 0, 220), 4.0f);
-  dl->AddRect(box_min, box_max, DIM, 4.0f, 0, 1.0f);
-  if (style.font_big) {
-    dl->AddText(style.font_big, style.font_big_size, ImVec2(bc.x - ts.x * 0.5f, bc.y - ts.y * 0.5f), WHITE, buf);
-  } else {
-    dl->AddText(ImVec2(bc.x - ts.x * 0.5f, bc.y - ts.y * 0.5f), WHITE, buf);
+  // fixed aircraft symbol, horizontal bars with upturned outer ends
+  for (float side : {-1.0f, 1.0f}) {
+    ImVec2 inner = add(center, ImVec2(side * radius * 0.10f, 0.0f));
+    ImVec2 outer = add(center, ImVec2(side * radius * 0.42f, 0.0f));
+    dl->AddLine(inner, outer, LIME, 3.5f);
+    dl->AddLine(outer, add(outer, ImVec2(0.0f, -radius * 0.08f)), LIME, 3.5f);
   }
+  dl->AddCircleFilled(center, 3.0f, LIME, 12);
 }
 
 // vertical moving tape (for speed, altitude, ...), value is centered and the scale moves
-inline void draw_tape(ImDrawList* dl, const Style& style, const ImVec2& pos, const ImVec2& size, const char* title,
-                      float value, float px_per_unit, float minor_step, int label_every, bool ticks_on_left)
+inline void draw_tape(ImDrawList* dl, const Style& style, const ImVec2& pos, const ImVec2& size, float value,
+                      float px_per_unit, float minor_step, int label_every, bool ticks_on_left)
 {
-  const ImVec2 vmin = pos;
-  const ImVec2 vmax = add(pos, size);
-  const float cy    = pos.y + size.y * 0.5f;
+  const ImVec2 vmin     = pos;
+  const ImVec2 vmax     = add(pos, size);
+  const float cy        = pos.y + size.y * 0.5f;
   const float tick_edge = ticks_on_left ? vmin.x : vmax.x;
   const float tick_dir  = ticks_on_left ? 1.0f : -1.0f;
+  const float fs        = style.font_size - 3.0f;
 
-  text_centered(dl, style.font, style.font_size, ImVec2(pos.x + size.x * 0.5f, pos.y - 12.0f), DIM, title);
-
-  dl->AddRectFilled(vmin, vmax, IM_COL32(10, 12, 16, 235));
+  dl->AddRectFilled(vmin, vmax, TAPE);
   dl->PushClipRect(vmin, vmax, true);
 
   const float half_range = size.y * 0.5f / px_per_unit;
@@ -271,49 +243,175 @@ inline void draw_tape(ImDrawList* dl, const Style& style, const ImVec2& pos, con
 
     float y    = cy - (v - value) * px_per_unit;
     bool major = (i % label_every == 0);
-    float tl   = major ? 13.0f : 7.0f;
+    float tl   = major ? 12.0f : 7.0f;
     dl->AddLine(ImVec2(tick_edge, y), ImVec2(tick_edge + tick_dir * tl, y), WHITE, major ? 2.0f : 1.0f);
 
     if (major) {
       char buf[16] = {};
       snprintf(buf, sizeof(buf), "%d", static_cast<int>(std::lround(v)));
-      float tx = ticks_on_left ? vmin.x + tl + 5.0f : vmax.x - tl - 5.0f;
-      ImVec2 ts = style.font ? style.font->CalcTextSizeA(style.font_size, FLT_MAX, 0.0f, buf)
-                             : ImGui::CalcTextSize(buf);
-      if (!ticks_on_left) tx -= ts.x;
-      if (style.font) {
-        dl->AddText(style.font, style.font_size, ImVec2(tx, y - ts.y * 0.5f), WHITE, buf);
-      } else {
-        dl->AddText(ImVec2(tx, y - ts.y * 0.5f), WHITE, buf);
-      }
+      ImVec2 ts = text_size(style.font, fs, buf);
+      float tx  = ticks_on_left ? vmin.x + tl + 4.0f : vmax.x - tl - 4.0f - ts.x;
+      draw_text(dl, style.font, fs, ImVec2(tx, y - ts.y * 0.5f), WHITE, buf);
     }
   }
 
   dl->PopClipRect();
   dl->AddRect(vmin, vmax, DIM, 0.0f, 0, 1.0f);
 
-  // digital readout box with a pointer towards the scale
+  // digital readout box at the center with a pointer towards the tape edge
   char buf[16] = {};
   snprintf(buf, sizeof(buf), "%d", static_cast<int>(std::lround(value)));
-  ImVec2 ts = style.font_big ? style.font_big->CalcTextSizeA(style.font_big_size, FLT_MAX, 0.0f, buf)
-                             : ImGui::CalcTextSize(buf);
-  const float pad = 5.0f;
-  ImVec2 box_min(vmin.x - pad, cy - ts.y * 0.5f - 4.0f);
-  ImVec2 box_max(vmax.x + pad, cy + ts.y * 0.5f + 4.0f);
-  dl->AddRectFilled(box_min, box_max, IM_COL32(0, 0, 0, 240), 3.0f);
-  dl->AddRect(box_min, box_max, WHITE, 3.0f, 0, 1.5f);
-
-  // pointer triangle sticking out of the box towards the tape edge
-  float px          = ticks_on_left ? box_min.x : box_max.x;
-  float pdir        = ticks_on_left ? -7.0f : 7.0f;
+  readout_box(dl, style, ImVec2(pos.x + size.x * 0.5f, cy), buf, GREEN);
+  float px   = ticks_on_left ? vmin.x - 4.0f : vmax.x + 4.0f;
+  float pdir = ticks_on_left ? -7.0f : 7.0f;
   const ImVec2 tri[3] = {ImVec2(px + pdir, cy), ImVec2(px, cy - 6.0f), ImVec2(px, cy + 6.0f)};
-  dl->AddConvexPolyFilled(tri, 3, WHITE);
+  dl->AddConvexPolyFilled(tri, 3, GREEN);
+}
 
-  if (style.font_big) {
-    dl->AddText(style.font_big, style.font_big_size, ImVec2(pos.x + size.x * 0.5f - ts.x * 0.5f, cy - ts.y * 0.5f),
-                YELLOW, buf);
-  } else {
-    dl->AddText(ImVec2(pos.x + size.x * 0.5f - ts.x * 0.5f, cy - ts.y * 0.5f), YELLOW, buf);
+// trapezoidal vertical speed indicator, right edge vertical, wider at the top,
+// zero in the middle, +/- max_vs at the ends
+inline void draw_vsi(ImDrawList* dl, const Style& style, const ImVec2& top_left, float top_width,
+                     float bottom_width, float height, float vs, float max_vs = 20.0f)
+{
+  const float x = top_left.x, y = top_left.y;
+  const float cy = y + height * 0.5f;
+
+  // left edge x coordinate at a given y
+  auto left_x = [&](float yy) { return x + (top_width - bottom_width) * (yy - y) / height; };
+
+  const ImVec2 poly[4] = {ImVec2(x, y), ImVec2(x + top_width, y), ImVec2(x + top_width, y + height),
+                          ImVec2(left_x(y + height), y + height)};
+  dl->AddConvexPolyFilled(poly, 4, TAPE);
+  for (int i = 0; i < 4; i++) {
+    dl->AddLine(poly[i], poly[(i + 1) % 4], DIM, 1.0f);
+  }
+
+  // zero line
+  dl->AddLine(ImVec2(left_x(cy), cy), ImVec2(x + top_width, cy), WHITE, 1.5f);
+
+  // ticks and labels at +/- max_vs and +/- max_vs/2
+  const float fs = style.font_size - 4.0f;
+  for (float f : {-1.0f, -0.5f, 0.5f, 1.0f}) {
+    float yy   = cy - f * height * 0.5f;
+    float lx   = left_x(yy);
+    bool major = (f == -1.0f || f == 1.0f);
+    dl->AddLine(ImVec2(lx, yy), ImVec2(lx + (major ? 7.0f : 5.0f), yy), WHITE, 1.5f);
+
+    if (major) {
+      char buf[8] = {};
+      snprintf(buf, sizeof(buf), "%d", static_cast<int>(std::lround(max_vs)));
+      ImVec2 ts = text_size(style.font, fs, buf);
+      // right-aligned inside the trapezoid, next to its vertical right edge
+      draw_text(dl, style.font, fs, ImVec2(x + top_width - ts.x - 3.0f, yy - ts.y * 0.5f), WHITE, buf);
+    }
+  }
+
+  // green needle pointing at the slanted left edge
+  float vy = cy - glm::clamp(vs / max_vs, -1.0f, 1.0f) * height * 0.5f;
+  float lx = left_x(vy);
+  const ImVec2 tri[3] = {ImVec2(lx, vy), ImVec2(lx + 11.0f, vy - 5.0f), ImVec2(lx + 11.0f, vy + 5.0f)};
+  dl->AddConvexPolyFilled(tri, 3, GREEN);
+}
+
+// horizontal heading tape, heading in degrees (0..360, increasing with right turns)
+inline void draw_hdg_tape(ImDrawList* dl, const Style& style, const ImVec2& pos, const ImVec2& size,
+                          float heading_deg)
+{
+  const ImVec2 vmin = pos;
+  const ImVec2 vmax = add(pos, size);
+  const float cx    = pos.x + size.x * 0.5f;
+
+  const float px_per_deg = size.x / 70.0f;  // show +/- 35 degrees
+
+  dl->AddRectFilled(vmin, vmax, TAPE);
+  dl->PushClipRect(vmin, vmax, true);
+
+  const float view = 40.0f;
+  const int first  = static_cast<int>(std::floor((heading_deg - view) / 5.0f)) * 5;
+  for (int a = first; a <= static_cast<int>(heading_deg + view); a += 5) {
+    // wrap the relative angle to [-180, 180)
+    float rel = std::fmod(static_cast<float>(a) - heading_deg + 540.0f, 360.0f) - 180.0f;
+    float x   = cx + rel * px_per_deg;
+
+    int h          = ((a % 360) + 360) % 360;
+    bool cardinal  = (h % 90 == 0);
+    bool labeled   = (h % 10 == 0);
+    float tl       = cardinal ? 13.0f : (labeled ? 10.0f : 6.0f);
+    ImU32 tick_col = (h == 0) ? IM_COL32(255, 80, 80, 255) : WHITE;
+    dl->AddLine(ImVec2(x, vmin.y), ImVec2(x, vmin.y + tl), tick_col, labeled ? 2.0f : 1.0f);
+
+    if (labeled) {
+      char buf[4] = {};
+      if (cardinal) {
+        const char* letters = "NESW";
+        snprintf(buf, sizeof(buf), "%c", letters[h / 90]);
+      } else {
+        snprintf(buf, sizeof(buf), "%d", h / 10);
+      }
+      text_centered(dl, style.font, style.font_size, ImVec2(x, vmin.y + tl + style.font_size * 0.7f), tick_col, buf);
+    }
+  }
+
+  dl->PopClipRect();
+  dl->AddRect(vmin, vmax, DIM, 0.0f, 0, 1.0f);
+
+  // green caret and stem at the center
+  const ImVec2 tri[3] = {ImVec2(cx - 6.0f, vmax.y + 1.0f), ImVec2(cx + 6.0f, vmax.y + 1.0f),
+                         ImVec2(cx, vmax.y - 7.0f)};
+  dl->AddConvexPolyFilled(tri, 3, GREEN);
+  dl->AddLine(ImVec2(cx, vmin.y + 6.0f), ImVec2(cx, vmax.y - 7.0f), GREEN, 2.0f);
+}
+
+// flight mode annunciator row: five columns, static texts replicating the reference
+inline void draw_fma(ImDrawList* dl, const Style& style, const ImVec2& pos, float width, float height)
+{
+  const char* cols[5][3] = {
+      {"SPEED", nullptr, nullptr}, {"G/S", "ALT", nullptr}, {"LOC*", nullptr, nullptr},
+      {"CAT 3", "SINGLE", nullptr}, {"AP1", "1 FD 2", "A/THR"},
+  };
+  const bool green[5] = {true, true, true, false, false};
+
+  const float col_w = width / 5.0f;
+  const float fs    = 13.0f;
+
+  for (int i = 0; i < 5; i++) {
+    if (i > 0) {
+      dl->AddLine(ImVec2(pos.x + col_w * i, pos.y), ImVec2(pos.x + col_w * i, pos.y + height),
+                  IM_COL32(90, 95, 105, 255), 1.0f);
+    }
+
+    float cx   = pos.x + col_w * (i + 0.5f);
+    ImU32 col  = green[i] ? GREEN : WHITE;
+    int n      = 0;
+    while (cols[i][n] != nullptr) n++;
+    float y = pos.y + (height - n * (fs + 2.0f)) * 0.5f;
+
+    for (int j = 0; j < n; j++) {
+      ImVec2 tp(cx, y + fs * 0.5f);
+      text_centered(dl, style.font, fs, tp, col, cols[i][j]);
+      if (i == 1 && j == 1) {  // box around "ALT"
+        ImVec2 ts = text_size(style.font, fs, cols[i][j]);
+        dl->AddRect(ImVec2(tp.x - ts.x * 0.5f - 4.0f, tp.y - ts.y * 0.5f - 2.0f),
+                    ImVec2(tp.x + ts.x * 0.5f + 4.0f, tp.y + ts.y * 0.5f + 2.0f), GREEN, 2.0f, 0, 1.2f);
+      }
+      y += fs + 2.0f;
+    }
+  }
+}
+
+// small compass rose icon, bottom right corner of the pfd
+inline void draw_nav_icon(ImDrawList* dl, const ImVec2& c, float r)
+{
+  dl->AddCircle(c, r, WHITE, 32, 1.2f);
+  dl->AddLine(add(c, ImVec2(0.0f, -r)), add(c, ImVec2(0.0f, -r * 0.35f)), WHITE, 1.2f);
+  dl->AddLine(add(c, ImVec2(0.0f, r)), add(c, ImVec2(0.0f, r * 0.35f)), WHITE, 1.2f);
+  dl->AddLine(add(c, ImVec2(-r, 0.0f)), add(c, ImVec2(-r * 0.35f, 0.0f)), WHITE, 1.2f);
+  dl->AddLine(add(c, ImVec2(r, 0.0f)), add(c, ImVec2(r * 0.35f, 0.0f)), WHITE, 1.2f);
+  const float d = r * 0.30f;
+  const ImVec2 diamond[4] = {add(c, ImVec2(0.0f, -d)), add(c, ImVec2(d, 0.0f)), add(c, ImVec2(0.0f, d)),
+                             add(c, ImVec2(-d, 0.0f))};
+  for (int i = 0; i < 4; i++) {
+    dl->AddLine(diamond[i], diamond[(i + 1) % 4], WHITE, 1.2f);
   }
 }
 

@@ -132,15 +132,15 @@ int main(void)
   glEnable(GL_BLEND);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-  // SDL options
-  SDL_ShowCursor(SDL_FALSE);
-  SDL_CaptureMouse(SDL_TRUE);
-  SDL_SetRelativeMouseMode(SDL_TRUE);
-
   ImGui_ImplSDL2_InitForOpenGL(window, context);
   ImGui_ImplOpenGL3_Init();
 
+  // the game only needs raw key events, disable text input so an active IME
+  // (ibus/fcitx) does not swallow key presses
+  SDL_StopTextInput();
+
   Joystick joystick;
+  joystick.throttle = 0.8f;  // start with some thrust, otherwise the plane just decelerates and descends
 
   // use pid for keyboard control
   PID pitch_control_pid(1.0f, 0.0f, 0.0f);
@@ -447,6 +447,9 @@ int main(void)
 
             case SDLK_o:
               orbit = !orbit;
+              // only capture the mouse while the orbit camera is active
+              SDL_ShowCursor(orbit ? SDL_FALSE : SDL_TRUE);
+              SDL_SetRelativeMouseMode(orbit ? SDL_TRUE : SDL_FALSE);
               break;
 
             case SDLK_i:
@@ -511,58 +514,79 @@ int main(void)
     window_flags |= ImGuiWindowFlags_NoResize;
     window_flags |= ImGuiWindowFlags_NoInputs;
 
-    // instrument panel on the left side of the window
+    // instrument panel: just the PFD box in the bottom left corner of the window
     {
       auto& ac = player.airplane;
 
       glm::vec3 euler_deg = glm::degrees(ac.get_euler_angles());
       float roll_deg = euler_deg.x, pitch_deg = euler_deg.z;
 
-      glm::vec3 fwd    = ac.forward();
+      glm::vec3 fwd     = ac.forward();
       float heading_deg = std::fmod(glm::degrees(std::atan2(fwd.z, fwd.x)) + 360.0f, 360.0f);
 
       float ias_kmh        = phi::units::kilometer_per_hour(ac.get_ias());
+      float altitude       = ac.get_altitude();
       float vertical_speed = ac.velocity.y;
 
-      ImGui::SetNextWindowPos(ImVec2(0, 0));
-      ImGui::SetNextWindowSize(ImVec2(300, RESOLUTION.y));
-      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.045f, 0.05f, 0.60f));
+      ImGui::SetNextWindowPos(ImVec2(0, RESOLUTION.y - 415.0f));
+      ImGui::SetNextWindowSize(ImVec2(500, 415));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
       ImGui::Begin("Instruments", nullptr, window_flags);
 
       ImDrawList* dl  = ImGui::GetWindowDrawList();
       const ImVec2 wp = ImGui::GetWindowPos();
 
-      instruments::draw_attitude_indicator(dl, instrument_style, ImVec2(wp.x + 150.0f, wp.y + 165.0f), 130.0f,
-                                           pitch_deg, roll_deg);
-      instruments::draw_heading_indicator(dl, instrument_style, ImVec2(wp.x + 150.0f, wp.y + 455.0f), 115.0f,
-                                          heading_deg);
-      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 15.0f, wp.y + 620.0f), ImVec2(65.0f, 430.0f),
-                             "IAS km/h", ias_kmh, 2.0f, 10.0f, 5, false);
-      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 220.0f, wp.y + 620.0f), ImVec2(65.0f, 430.0f),
-                             "ALT m", ac.get_altitude(), 0.4f, 25.0f, 4, true);
+      // the pfd box
+      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
+      const ImVec2 box_max(wp.x + 490.0f, wp.y + 405.0f);
+      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
+      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
 
-      // textual readouts between the two tapes
-      const ImU32 white = instruments::WHITE;
-      char buf[64];
-      float tx = wp.x + 92.0f, ty = wp.y + 645.0f;
-      auto line = [&](const char* text) {
-        if (instrument_style.font) {
-          dl->AddText(instrument_style.font, instrument_style.font_size, ImVec2(tx, ty), white, text);
-        } else {
-          dl->AddText(ImVec2(tx, ty), white, text);
-        }
-        ty += 30.0f;
-      };
-      snprintf(buf, sizeof(buf), "V/S  %+.1f m/s", vertical_speed), line(buf);
-      snprintf(buf, sizeof(buf), "G    %.1f", ac.get_g()), line(buf);
-      snprintf(buf, sizeof(buf), "AoA  %.1f", ac.get_aoa()), line(buf);
-      snprintf(buf, sizeof(buf), "THR  %.0f %%", ac.throttle * 100.0f), line(buf);
-      snprintf(buf, sizeof(buf), "MACH %.2f", ac.get_mach()), line(buf);
-      snprintf(buf, sizeof(buf), "TRIM %.2f", ac.joystick.w), line(buf);
-      snprintf(buf, sizeof(buf), "FPS  %.1f", fps), line(buf);
+      // flight mode annunciator row (static, for the look)
+      instruments::draw_fma(dl, instrument_style, ImVec2(box_min.x + 6.0f, box_min.y + 4.0f),
+                            box_max.x - box_min.x - 12.0f, 44.0f);
+      dl->AddLine(ImVec2(box_min.x + 2.0f, box_min.y + 54.0f), ImVec2(box_max.x - 2.0f, box_min.y + 54.0f),
+                  IM_COL32(90, 95, 105, 255), 1.0f);
+
+      // attitude ball with flanking tapes and the vsi trapezoid
+      instruments::draw_attitude_indicator(dl, instrument_style, ImVec2(wp.x + 240.0f, wp.y + 204.0f), 120.0f,
+                                           pitch_deg, roll_deg);
+      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 30.0f, wp.y + 84.0f), ImVec2(48.0f, 240.0f),
+                             ias_kmh, 2.0f, 10.0f, 2, false);
+      instruments::draw_tape(dl, instrument_style, ImVec2(wp.x + 402.0f, wp.y + 84.0f), ImVec2(48.0f, 240.0f),
+                             altitude, 0.25f, 25.0f, 4, true);
+      instruments::draw_vsi(dl, instrument_style, ImVec2(wp.x + 468.0f, wp.y + 110.0f), 16.0f, 7.0f, 188.0f,
+                            vertical_speed);
+
+      // bottom row: navaid info on the left, heading tape in the middle, icon on the right
+      instruments::draw_hdg_tape(dl, instrument_style, ImVec2(wp.x + 120.0f, wp.y + 340.0f), ImVec2(240.0f, 44.0f),
+                                 heading_deg);
+      instruments::draw_text(dl, instrument_style.font, 13.0f, ImVec2(box_min.x + 18.0f, wp.y + 340.0f),
+                             instruments::WHITE, "JAI");
+      instruments::draw_text(dl, instrument_style.font, 13.0f, ImVec2(box_min.x + 18.0f, wp.y + 360.0f),
+                             instruments::WHITE, "109.90");
+      instruments::draw_text(dl, instrument_style.font, 13.0f, ImVec2(box_min.x + 18.0f, wp.y + 380.0f),
+                             instruments::WHITE, "7.2 NM");
+      instruments::draw_nav_icon(dl, ImVec2(box_max.x - 24.0f, wp.y + 362.0f), 11.0f);
 
       ImGui::End();
       ImGui::PopStyleColor();
+
+      // textual readouts, top left corner
+      ImGui::SetNextWindowPos(ImVec2(10, 10));
+      ImGui::SetNextWindowSize(ImVec2(190, 175));
+      ImGui::SetNextWindowBgAlpha(0.35f);
+      ImGui::Begin("Data", nullptr, window_flags);
+      ImGui::PushFont(instrument_style.font);
+      ImGui::Text("V/S  %+.1f m/s", vertical_speed);
+      ImGui::Text("G    %.1f", ac.get_g());
+      ImGui::Text("AoA  %.1f", ac.get_aoa());
+      ImGui::Text("THR  %.0f %%", ac.throttle * 100.0f);
+      ImGui::Text("MACH %.2f", ac.get_mach());
+      ImGui::Text("TRIM %.2f", ac.joystick.w);
+      ImGui::Text("FPS  %.1f", fps);
+      ImGui::PopFont();
+      ImGui::End();
     }
 
 #if DEBUG_INFO
