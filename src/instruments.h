@@ -415,4 +415,87 @@ inline void draw_nav_icon(ImDrawList* dl, const ImVec2& c, float r)
   }
 }
 
+// map display: terrain texture seen from above with the aircraft position and heading
+inline void draw_map(ImDrawList* dl, const Style& style, const ImVec2& box_min, const ImVec2& box_max,
+                     unsigned int texture, const glm::vec3& pos, float heading_deg, float terrain_size)
+{
+  const float margin = 12.0f;
+  const ImVec2 map_min = add(box_min, ImVec2(margin, margin));
+  const ImVec2 map_max = sub(box_max, ImVec2(margin, margin));
+
+  // terrain texture: uv = pos.xz / terrain_size + 0.5 (same mapping as the terrain shader)
+  dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), map_min, map_max);
+  dl->AddRect(map_min, map_max, DIM, 0.0f, 0, 1.0f);
+
+  // aircraft position on the map, clamped to the map edge
+  float u = glm::clamp(pos.x / terrain_size + 0.5f, 0.0f, 1.0f);
+  float v = glm::clamp(pos.z / terrain_size + 0.5f, 0.0f, 1.0f);
+  const ImVec2 ac(map_min.x + u * (map_max.x - map_min.x), map_min.y + v * (map_max.y - map_min.y));
+
+  // aircraft marker pointing along the heading (0 = +x, increasing towards +z = screen down)
+  const float a  = glm::radians(heading_deg + 90.0f);
+  const ImVec2 d = rot(ImVec2(0.0f, -1.0f), a);  // nose direction
+  const ImVec2 s = rot(ImVec2(1.0f, 0.0f), a);   // wing direction
+  const ImVec2 tri[3] = {add(ac, mul(d, 9.0f)), add(add(ac, mul(d, -7.0f)), mul(s, 5.0f)),
+                         sub(add(ac, mul(d, -7.0f)), mul(s, 5.0f))};
+  dl->AddConvexPolyFilled(tri, 3, LIME);
+  dl->AddCircle(ac, 10.0f, LIME, 24, 1.2f);
+}
+
+// radar scope with a rotating sweep and a phosphor afterglow trail
+inline void draw_radar(ImDrawList* dl, const Style& style, const ImVec2& center, float radius, float time)
+{
+  const ImU32 face = IM_COL32(4, 18, 10, 255);
+  const ImU32 grid = IM_COL32(40, 120, 70, 255);
+
+  const float sweep_speed = glm::radians(90.0f);  // one revolution every 4 seconds
+  const float sweep       = std::fmod(time * sweep_speed, TWO_PI);
+
+  // face, range rings, crosshair and tick ring
+  dl->AddCircleFilled(center, radius, face, 64);
+  for (float f : {0.33f, 0.66f, 1.0f}) {
+    dl->AddCircle(center, radius * f, grid, 48, 1.0f);
+  }
+  dl->AddLine(add(center, ImVec2(-radius, 0.0f)), add(center, ImVec2(radius, 0.0f)), grid, 1.0f);
+  dl->AddLine(add(center, ImVec2(0.0f, -radius)), add(center, ImVec2(0.0f, radius)), grid, 1.0f);
+  for (int a = 0; a < 360; a += 30) {
+    ImVec2 d = rot(ImVec2(0.0f, -1.0f), glm::radians(static_cast<float>(a)));
+    dl->AddLine(add(center, mul(d, radius - 6.0f)), add(center, mul(d, radius)), grid, 1.0f);
+  }
+
+  // phosphor afterglow: a fan of wedges trailing the sweep with fading alpha
+  const int N        = 48;
+  const float span   = glm::radians(100.0f);
+  const float step   = span / N;
+  const ImVec2 ex(1.0f, 0.0f);
+  for (int i = 0; i < N; i++) {
+    float a0    = sweep - i * step;
+    float a1    = a0 - step * 1.2f;  // slight overlap to hide the seams
+    float fade  = 1.0f - static_cast<float>(i) / N;
+    int alpha   = static_cast<int>(110.0f * fade * fade);
+    if (alpha <= 0) continue;
+    const ImVec2 wedge[3] = {center, add(center, mul(rot(ex, a0), radius)),
+                             add(center, mul(rot(ex, a1), radius))};
+    dl->AddConvexPolyFilled(wedge, 3, IM_COL32(0, 255, 130, alpha));
+  }
+
+  // a few static targets, lit up when the sweep passes over them
+  static const struct {
+    float ang, dist, size;
+  } blips[] = {
+      {0.6f, 0.45f, 3.0f}, {1.9f, 0.70f, 2.5f}, {2.8f, 0.30f, 3.5f}, {4.0f, 0.80f, 2.5f}, {5.4f, 0.55f, 3.0f},
+  };
+  for (const auto& b : blips) {
+    float rel = std::fmod(sweep - b.ang + TWO_PI, TWO_PI);  // angle since the sweep passed
+    int alpha = static_cast<int>(255.0f * std::exp(-rel * 1.5f));
+    if (alpha <= 8) continue;
+    ImVec2 pos = add(center, mul(rot(ex, b.ang), b.dist * radius));
+    dl->AddCircleFilled(pos, b.size, IM_COL32(120, 255, 170, alpha), 12);
+  }
+
+  // sweep leading edge
+  dl->AddLine(center, add(center, mul(rot(ex, sweep), radius)), IM_COL32(150, 255, 180, 255), 2.0f);
+  dl->AddCircleFilled(center, 2.5f, IM_COL32(150, 255, 180, 255), 12);
+}
+
 };  // namespace instruments

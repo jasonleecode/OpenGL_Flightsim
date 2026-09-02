@@ -46,10 +46,113 @@ JK      control thrust
 #define PS1_RESOLUTION     0
 #define DEBUG_INFO         0
 
-/* select flightmodel */
-#define FAST_JET    0
-#define CESSNA      1
-#define FLIGHTMODEL FAST_JET
+/* aircraft models */
+enum AircraftModel { MODEL_FAST_JET, MODEL_CESSNA };
+
+float aircraft_cruise_speed(AircraftModel model)
+{
+  return phi::units::meter_per_second(model == MODEL_CESSNA ? 200.0f : 500.0f);
+}
+
+// build an airplane for the given model
+Airplane make_aircraft(AircraftModel model)
+{
+  if (model == MODEL_CESSNA) {
+    // airplane mass
+    const float mass = 1000.0f;
+
+    // engine
+    const float rpm = 2400.0f;
+    const float horsepower = 160.0f;
+    const float prop_diameter = 1.9f;
+
+    // main wing
+    const float total_wing_area = 16.17f;
+    const float total_wing_span = 11.00f;
+    const float main_wing_span = total_wing_span / 2;
+    const float main_wing_area = total_wing_area / 2;
+    const float main_wing_chord = main_wing_area / main_wing_span;
+
+    // horizontal tail
+    const float elevator_area = 1.35f;
+    const float h_tail_area = 2.0f + elevator_area;
+    const float h_tail_span = 2.0f;
+    const float h_tail_chord = h_tail_area / h_tail_span;
+
+    // vertical tail
+    const float v_tail_area = 2.04f;  // modified
+    const float v_tail_span = 2.04f;
+    const float v_tail_chord = v_tail_area / v_tail_span;
+
+    const float wing_offset = -0.2f;
+    const float tail_offset = -4.6f;
+
+    // design coordinates go from the back forwards
+    std::vector<phi::inertia::Element> mass_elements = {
+        phi::inertia::cube({wing_offset, 0.5f, -2.7f}, {main_wing_chord, 0.10f, main_wing_span}),  // left wing
+        phi::inertia::cube({wing_offset, 0.5f, +2.7f}, {main_wing_chord, 0.10f, main_wing_area}),  // right wing
+        phi::inertia::cube({tail_offset, -0.1f, 0.0f}, {h_tail_chord, 0.10f, h_tail_span}),        // elevator
+        phi::inertia::cube({tail_offset, 0.0f, 0.0f}, {v_tail_chord, v_tail_span, 0.10f}),         // rudder
+        phi::inertia::cube({0.0f, 0.0f, 0.0f}, {8.0f, 2.0f, 1.0f}),                                // fuselage
+    };
+
+    // individual element mass is proportional to volume
+    glm::vec3 center_of_gravity;
+    phi::inertia::set_uniform_density(mass_elements, mass);
+
+    // compute inertia tensor
+    const auto inertia = phi::inertia::tensor(mass_elements, true, &center_of_gravity);
+
+    auto l_wing_pos = mass_elements[0].offset;
+    auto r_wing_pos = mass_elements[1].offset;
+    auto h_tail_pos = mass_elements[2].offset;
+    auto v_tail_pos = mass_elements[3].offset;
+
+    // static: wings hold pointers to these, they must outlive the aircraft
+    static const Airfoil NACA_0012(NACA_0012_data);
+    static const Airfoil NACA_2412(NACA_2412_data);
+
+    std::vector<Wing> wings = {
+        Wing(&NACA_2412, l_wing_pos, main_wing_area, main_wing_span, phi::UP, 0.10f),  // left wing
+        Wing(&NACA_2412, r_wing_pos, main_wing_area, main_wing_span, phi::UP, 0.10f),  // right wing
+        Wing(&NACA_0012, h_tail_pos, h_tail_area, h_tail_span, phi::UP, 0.25f),        // horizontal tail
+        Wing(&NACA_0012, v_tail_pos, v_tail_area, v_tail_span, phi::RIGHT, 0.25f),     // vertical tail
+    };
+
+    return Airplane(mass, inertia, wings, {new PropellerEngine(horsepower, rpm, prop_diameter)}, nullptr);
+  }
+
+  const float mass = 10000.0f;
+  const float thrust = 75000.0f;
+
+  const float wing_offset = -1.0f;
+  const float tail_offset = -6.6f;
+
+  std::vector<phi::inertia::Element> masses = {
+      phi::inertia::cube({wing_offset, 0.0f, -2.7f}, {6.96f, 0.10f, 3.50f}, mass * 0.25f),  // left wing
+      phi::inertia::cube({wing_offset, 0.0f, +2.7f}, {6.96f, 0.10f, 3.50f}, mass * 0.25f),  // right wing
+      phi::inertia::cube({tail_offset, -0.1f, 0.0f}, {6.54f, 0.10f, 2.70f}, mass * 0.1f),   // elevator
+      phi::inertia::cube({tail_offset, 0.0f, 0.0f}, {5.31f, 3.10f, 0.10f}, mass * 0.1f),    // rudder
+      phi::inertia::cube({0.0f, 0.0f, 0.0f}, {8.0f, 2.0f, 2.0f}, mass * 0.5f),              // fuselage
+  };
+
+  const auto inertia = phi::inertia::tensor(masses, true);
+
+  // static: wings hold pointers to these, they must outlive the aircraft
+  static const Airfoil NACA_0012(NACA_0012_data);
+  static const Airfoil NACA_2412(NACA_2412_data);
+
+  std::vector<Wing> wings = {
+      // main wings get a few degrees of incidence, otherwise lift at level attitude
+      // is not enough to hold altitude and the plane settles into a steady descent
+      Wing({wing_offset, 0.0f, -2.7f}, 6.96f, 2.50f, &NACA_2412, Wing::calc_wing_normal(phi::UP, 1.5f), 0.20f),
+      Wing({wing_offset, 0.0f, +2.7f}, 6.96f, 2.50f, &NACA_2412, Wing::calc_wing_normal(phi::UP, 1.5f), 0.20f),
+      Wing({tail_offset, -0.1f, 0.0f}, 6.54f, 2.70f, &NACA_0012, phi::UP, 1.0f),     // elevator
+      Wing({tail_offset, 0.0f, 0.0f}, 5.31f, 3.10f, &NACA_0012, phi::RIGHT, 0.15f),  // rudder
+  };
+
+  return Airplane(mass, inertia, wings, {new SimpleEngine(thrust)}, nullptr);
+}
 
 #if PS1_RESOLUTION
 constexpr glm::ivec2 RESOLUTION{640, 480};
@@ -190,6 +293,26 @@ int main(void)
   Clipmap clipmap;
   scene.add(&clipmap);
 #endif
+
+  // terrain texture for the map instrument, same source and mapping as the terrain shader
+  gfx::gl::Texture map_texture(PATH + "texture.png", gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
+  const float map_terrain_size = MAX_TILE_SIZE / ZOOM_FACTOR;
+
+  // low-res texture + fbo for the frosted glass status bar: the framebuffer region
+  // behind the bar is blitted into this texture each frame and stretched back for a blur
+  const glm::ivec2 glass_tex_size(160, 16);
+  gfx::gl::Texture glass_tex;
+  glass_tex.bind(0);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, glass_tex_size.x, glass_tex_size.y, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+  glass_tex.set_parameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glass_tex.set_parameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glass_tex.unbind();
+
+  GLuint glass_fbo = 0;
+  glGenFramebuffers(1, &glass_fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glass_tex.id, 0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
 #if 0
   int width, height, channels;
   const std::string heightmap_path = "assets/textures/terrain/1/heightmap.png";
@@ -201,139 +324,8 @@ int main(void)
 
   glm::vec3 initial_position = glm::vec3(0.0f, 3000.0f, 0.0f);
 
-#if (FLIGHTMODEL == CESSNA)
-  constexpr float speed = phi::units::meter_per_second(200.0f /* km/h */);
-
-  // airplane mass
-  const float mass = 1000.0f;
-
-  // engine
-  const float rpm = 2400.0f;
-  const float horsepower = 160.0f;
-  const float prop_diameter = 1.9f;
-
-  // main wing
-  const float total_wing_area = 16.17f;
-  const float total_wing_span = 11.00f;
-  const float main_wing_span = total_wing_span / 2;
-  const float main_wing_area = total_wing_area / 2;
-  const float main_wing_chord = main_wing_area / main_wing_span;
-
-  // aileron
-  const float aileron_area = 1.70f;
-  const float aileron_span = 1.26f;
-  const auto aileron_offset = glm::vec3(-main_wing_chord * 0.75f, 0.0f, 0.0f);
-
-  // horizontal tail
-  const float elevator_area = 1.35f;
-  const float h_tail_area = 2.0f + elevator_area;
-  const float h_tail_span = 2.0f;
-  const float h_tail_chord = h_tail_area / h_tail_span;
-
-  // vertical tail
-  const float v_tail_area = 2.04f;  // modified
-  const float v_tail_span = 2.04f;
-  const float v_tail_chord = v_tail_area / v_tail_span;
-
-  const float wing_offset = -0.2f;
-  const float tail_offset = -4.6f;
-
-  std::cout << "aileron_offset = " << aileron_offset << std::endl;
-
-  // design coordinates go from the back forwards
-  std::vector<phi::inertia::Element> mass_elements = {
-#if 0
-    {.size = {main_wing_chord, 0.10f, main_wing_span}, .position = {5.0f, 0.5f, -2.7f}},  // left wing
-    {.size = {main_wing_chord, 0.10f, main_wing_span}, .position = {5.0f, 0.5f, +2.7f}},  // right wing
-    {.size = {h_tail_chord, 0.10f, h_tail_span}, .position = {0.0f, 0.0f, 0.0f}},         // horizontal tail
-    {.size = {v_tail_chord, v_tail_span, 0.1f}, .position = {0.0f, 1.0f, 0.0f}},          // vertical tail
-    {.size = {5.0f, 1.0f, 1.0f}, .position = {6.5f, 0.0f, 0.0f}},                         // fuselage
-#else
-    phi::inertia::cube({wing_offset, 0.5f, -2.7f}, {main_wing_chord, 0.10f, main_wing_span}),  // left wing
-    phi::inertia::cube({wing_offset, 0.5f, +2.7f}, {main_wing_chord, 0.10f, main_wing_area}),  // right wing
-    phi::inertia::cube({tail_offset, -0.1f, 0.0f}, {h_tail_chord, 0.10f, h_tail_span}),        // elevator
-    phi::inertia::cube({tail_offset, 0.0f, 0.0f}, {v_tail_chord, v_tail_span, 0.10f}),         // rudder
-    phi::inertia::cube({0.0f, 0.0f, 0.0f}, {8.0f, 2.0f, 1.0f}),                                // fuselage
-#endif
-  };
-
-  // individual element mass is proportional to volume
-  glm::vec3 center_of_gravity;
-  phi::inertia::set_uniform_density(mass_elements, mass);
-  std::cout << "cg = " << center_of_gravity << std::endl;
-
-  // compute inertia tensor
-  const auto inertia = phi::inertia::tensor(mass_elements, true, &center_of_gravity);
-  std::cout << "inertia = " << inertia << std::endl;
-
-  for (int i = 0; i < mass_elements.size(); i++) {
-    auto& m = mass_elements[i];
-    std::cout << "[Mass] m = " << m.mass << ", o = " << m.offset << ", p = " << m.position << std::endl;
-  }
-
-#if 0
-  auto l_wing_pos = glm::vec3{wing_offset, 0.0f, -2.7f};
-  auto r_wing_pos = glm::vec3{wing_offset, 0.0f, +2.7f};
-  auto h_tail_pos = glm::vec3{tail_offset, -0.1f, 0.0f};
-  auto v_tail_pos = glm::vec3{tail_offset, 0.5f, 0.0f};
-#else
-  auto l_wing_pos = mass_elements[0].offset;
-  auto r_wing_pos = mass_elements[1].offset;
-  auto h_tail_pos = mass_elements[2].offset;
-  auto v_tail_pos = mass_elements[3].offset;
-#endif
-
-  const Airfoil NACA_0012(NACA_0012_data);
-  const Airfoil NACA_2412(NACA_2412_data);
-
-  std::vector<Wing> wings = {
-      Wing(&NACA_2412, l_wing_pos, main_wing_area, main_wing_span, phi::UP, 0.10f),  // left wing
-      Wing(&NACA_2412, r_wing_pos, main_wing_area, main_wing_span, phi::UP, 0.10f),  // right wing
-      Wing(&NACA_0012, h_tail_pos, h_tail_area, h_tail_span, phi::UP, 0.25f),        // horizontal tail
-      Wing(&NACA_0012, v_tail_pos, v_tail_area, v_tail_span, phi::RIGHT, 0.25f),     // vertical tail
-  };
-
-  Engine* engine = new PropellorEngine(horsepower, rpm, prop_diameter);
-
-#elif (FLIGHTMODEL == FAST_JET)
-
-  constexpr float speed = phi::units::meter_per_second(500.0f /* km/h */);
-
-  const float mass = 10000.0f;
-  const float thrust = 75000.0f;
-
-  const float wing_offset = -1.0f;
-  const float tail_offset = -6.6f;
-
-  std::vector<phi::inertia::Element> masses = {
-      phi::inertia::cube({wing_offset, 0.0f, -2.7f}, {6.96f, 0.10f, 3.50f}, mass * 0.25f),  // left wing
-      phi::inertia::cube({wing_offset, 0.0f, +2.7f}, {6.96f, 0.10f, 3.50f}, mass * 0.25f),  // right wing
-      phi::inertia::cube({tail_offset, -0.1f, 0.0f}, {6.54f, 0.10f, 2.70f}, mass * 0.1f),   // elevator
-      phi::inertia::cube({tail_offset, 0.0f, 0.0f}, {5.31f, 3.10f, 0.10f}, mass * 0.1f),    // rudder
-      phi::inertia::cube({0.0f, 0.0f, 0.0f}, {8.0f, 2.0f, 2.0f}, mass * 0.5f),              // fuselage
-  };
-
-  const auto inertia = phi::inertia::tensor(masses, true);
-
-  const Airfoil NACA_0012(NACA_0012_data);
-  const Airfoil NACA_2412(NACA_2412_data);
-  const Airfoil NACA_64_206(NACA_64_206_data);
-
-  std::vector<Wing> wings = {
-      Wing({wing_offset, 0.0f, -2.7f}, 6.96f, 2.50f, &NACA_2412, phi::UP, 0.20f),    // left wing
-      Wing({wing_offset, 0.0f, +2.7f}, 6.96f, 2.50f, &NACA_2412, phi::UP, 0.20f),    // right wing
-      Wing({tail_offset, -0.1f, 0.0f}, 6.54f, 2.70f, &NACA_0012, phi::UP, 1.0f),     // elevator
-      Wing({tail_offset, 0.0f, 0.0f}, 5.31f, 3.10f, &NACA_0012, phi::RIGHT, 0.15f),  // rudder
-  };
-
-  Engine* engine = new SimpleEngine(thrust);
-#else
-#error FLIGHTMODEL not defined
-#endif
-
-  std::vector<Airplane> rigid_bodies = {
-      Airplane(mass, inertia, wings, {engine}, nullptr),
-  };
+  AircraftModel aircraft_model = MODEL_FAST_JET;
+  std::vector<Airplane> rigid_bodies = {make_aircraft(aircraft_model)};
 
   GameObject player = {
       .transform = gfx::Mesh(model, texture),
@@ -341,7 +333,7 @@ int main(void)
   };
 
   player.airplane.position = initial_position;
-  player.airplane.velocity = glm::vec3(speed, 0.0f, 0.0f);
+  player.airplane.velocity = glm::vec3(aircraft_cruise_speed(aircraft_model), 0.0f, 0.0f);
   scene.add(&player.transform);
   objects.push_back(&player);
 
@@ -407,6 +399,21 @@ int main(void)
 
   SDL_Event event;
   bool quit = false, paused = false, orbit = false;
+  bool show_settings = false;
+
+  // rebuild the player aircraft with a different model, keeping position and attitude
+  auto switch_aircraft = [&](AircraftModel model) {
+    auto& old = rigid_bodies[0];
+    for (auto e : old.engines) delete e;
+
+    Airplane next  = make_aircraft(model);
+    next.position  = old.position;
+    next.rotation  = old.rotation;
+    float spd      = glm::length(old.velocity);
+    next.velocity  = (spd > 1.0f ? old.velocity / spd : old.forward()) * aircraft_cruise_speed(model);
+    aircraft_model = model;
+    rigid_bodies[0] = std::move(next);  // move: Wing is not copy-assignable due to its const members
+  };
   uint64_t last = 0, now = SDL_GetPerformanceCounter();
   phi::Seconds dt, timer = 0, log_timer = 0, flight_time = 0.0f;
   float fps = 0.0f;
@@ -514,20 +521,98 @@ int main(void)
     window_flags |= ImGuiWindowFlags_NoResize;
     window_flags |= ImGuiWindowFlags_NoInputs;
 
+    // flight data shared by all instruments
+    auto& ac = player.airplane;
+
+    // pitch and roll from the body axis vectors: unlike euler angles these
+    // are independent of the heading and do not flip when flying south
+    float pitch_deg = glm::degrees(std::asin(glm::clamp(ac.forward().y, -1.0f, 1.0f)));
+    float roll_deg  = glm::degrees(std::atan2(-ac.right().y, ac.up().y));
+
+    glm::vec3 fwd     = ac.forward();
+    float heading_deg = std::fmod(glm::degrees(std::atan2(fwd.z, fwd.x)) + 360.0f, 360.0f);
+
+    float ias_kmh        = phi::units::kilometer_per_hour(ac.get_ias());
+    float altitude       = ac.get_altitude();
+    float vertical_speed = ac.velocity.y;
+
+    // frosted glass status bar at the top center of the window
+    {
+      const ImVec2 bar_size(760.0f, 62.0f);
+      const ImVec2 bar_pos((RESOLUTION.x - bar_size.x) * 0.5f, 15.0f);
+
+      ImGui::SetNextWindowPos(bar_pos);
+      ImGui::SetNextWindowSize(bar_size);
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+      ImGui::Begin("StatusBar", nullptr, window_flags);
+
+      ImDrawList* dl  = ImGui::GetWindowDrawList();
+      const ImVec2 wp = ImGui::GetWindowPos();
+
+      // heavily downscaled copy of the framebuffer behind the bar, stretched back = blur
+      // (the texture content is updated after the 3d scene is rendered, see below)
+      dl->AddImageRounded(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(glass_tex.id)), wp,
+                          instruments::add(wp, bar_size), ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f),
+                          IM_COL32(255, 255, 255, 255), 10.0f);
+      dl->AddRectFilled(wp, instruments::add(wp, bar_size), IM_COL32(15, 20, 26, 140), 10.0f);
+      dl->AddRect(wp, instruments::add(wp, bar_size), IM_COL32(255, 255, 255, 55), 10.0f, 0, 1.0f);
+
+      const char* labels[] = {"IAS km/h", "ALT m", "HDG", "V/S m/s", "MACH"};
+      char values[5][16];
+      snprintf(values[0], sizeof(values[0]), "%d", static_cast<int>(std::lround(ias_kmh)));
+      snprintf(values[1], sizeof(values[1]), "%d", static_cast<int>(std::lround(altitude)));
+      snprintf(values[2], sizeof(values[2]), "%03d", static_cast<int>(std::lround(heading_deg)) % 360);
+      snprintf(values[3], sizeof(values[3]), "%+.1f", vertical_speed);
+      snprintf(values[4], sizeof(values[4]), "%.2f", ac.get_mach());
+
+      for (int i = 0; i < 5; i++) {
+        float cx = wp.x + bar_size.x * (i + 0.5f) / 5.0f;
+        instruments::text_centered(dl, instrument_style.font, 12.0f, ImVec2(cx, wp.y + 16.0f), instruments::DIM,
+                                   labels[i]);
+        instruments::text_centered(dl, instrument_style.font_big, 20.0f, ImVec2(cx, wp.y + 42.0f),
+                                   instruments::WHITE, values[i]);
+      }
+
+      ImGui::End();
+      ImGui::PopStyleColor();
+    }
+
+    // settings button in the top right corner
+    {
+      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 110.0f, 10.0f));
+      ImGui::SetNextWindowSize(ImVec2(100.0f, 40.0f));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.045f, 0.05f, 0.60f));
+      ImGui::Begin("SettingsButton", nullptr,
+                   (window_flags & ~ImGuiWindowFlags_NoInputs) | ImGuiWindowFlags_NoFocusOnAppearing);
+      ImGui::PushFont(instrument_style.font);
+      if (ImGui::Button("Settings", ImVec2(88.0f, 28.0f))) {
+        show_settings = !show_settings;
+      }
+      ImGui::PopFont();
+      ImGui::End();
+      ImGui::PopStyleColor();
+    }
+
+    // floating settings window
+    if (show_settings) {
+      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 320.0f, 60.0f), ImGuiCond_FirstUseEver);
+      ImGui::SetNextWindowSize(ImVec2(240.0f, 0.0f));  // auto height
+      ImGui::PushFont(instrument_style.font);
+      ImGui::Begin("Settings", &show_settings);
+      ImGui::Text("Aircraft");
+      ImGui::Spacing();
+      if (ImGui::RadioButton("Fast Jet", aircraft_model == MODEL_FAST_JET)) {
+        switch_aircraft(MODEL_FAST_JET);
+      }
+      if (ImGui::RadioButton("Cessna", aircraft_model == MODEL_CESSNA)) {
+        switch_aircraft(MODEL_CESSNA);
+      }
+      ImGui::End();
+      ImGui::PopFont();
+    }
+
     // instrument panel: just the PFD box in the bottom left corner of the window
     {
-      auto& ac = player.airplane;
-
-      glm::vec3 euler_deg = glm::degrees(ac.get_euler_angles());
-      float roll_deg = euler_deg.x, pitch_deg = euler_deg.z;
-
-      glm::vec3 fwd     = ac.forward();
-      float heading_deg = std::fmod(glm::degrees(std::atan2(fwd.z, fwd.x)) + 360.0f, 360.0f);
-
-      float ias_kmh        = phi::units::kilometer_per_hour(ac.get_ias());
-      float altitude       = ac.get_altitude();
-      float vertical_speed = ac.velocity.y;
-
       ImGui::SetNextWindowPos(ImVec2(0, RESOLUTION.y - 415.0f));
       ImGui::SetNextWindowSize(ImVec2(500, 415));
       ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
@@ -587,6 +672,49 @@ int main(void)
       ImGui::Text("FPS  %.1f", fps);
       ImGui::PopFont();
       ImGui::End();
+    }
+
+    // radar scope in the bottom right corner
+    {
+      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 330.0f, RESOLUTION.y - 330.0f));
+      ImGui::SetNextWindowSize(ImVec2(330, 330));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
+      ImGui::Begin("Radar", nullptr, window_flags);
+
+      ImDrawList* dl  = ImGui::GetWindowDrawList();
+      const ImVec2 wp = ImGui::GetWindowPos();
+
+      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
+      const ImVec2 box_max(wp.x + 320.0f, wp.y + 320.0f);
+      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
+      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+
+      instruments::draw_radar(dl, instrument_style, ImVec2(wp.x + 165.0f, wp.y + 165.0f), 135.0f, flight_time);
+
+      ImGui::End();
+      ImGui::PopStyleColor();
+    }
+
+    // map display above the radar
+    {
+      ImGui::SetNextWindowPos(ImVec2(RESOLUTION.x - 330.0f, RESOLUTION.y - 670.0f));
+      ImGui::SetNextWindowSize(ImVec2(330, 330));
+      ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));  // transparent, only the box shows
+      ImGui::Begin("Map", nullptr, window_flags);
+
+      ImDrawList* dl  = ImGui::GetWindowDrawList();
+      const ImVec2 wp = ImGui::GetWindowPos();
+
+      const ImVec2 box_min(wp.x + 10.0f, wp.y + 10.0f);
+      const ImVec2 box_max(wp.x + 320.0f, wp.y + 320.0f);
+      dl->AddRectFilled(box_min, box_max, IM_COL32(8, 9, 11, 245), 8.0f);
+      dl->AddRect(box_min, box_max, IM_COL32(70, 75, 85, 255), 8.0f, 0, 1.5f);
+
+      instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture.id, player.airplane.position,
+                            heading_deg, map_terrain_size);
+
+      ImGui::End();
+      ImGui::PopStyleColor();
     }
 
 #if DEBUG_INFO
@@ -651,6 +779,18 @@ int main(void)
       cross.visible = fpm.visible = true;
     }
     renderer.render(camera, scene);
+
+    // update the frosted glass texture with this frame's scene behind the status bar
+    {
+      const float bar_w = 760.0f, bar_h = 62.0f;
+      const int x0 = static_cast<int>((RESOLUTION.x - bar_w) * 0.5f);
+      const int y0 = static_cast<int>(RESOLUTION.y - 15.0f - bar_h);  // gl coordinates, origin at bottom left
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, glass_fbo);
+      glBlitFramebuffer(x0, y0, x0 + static_cast<int>(bar_w), y0 + static_cast<int>(bar_h), 0, 0, glass_tex_size.x,
+                        glass_tex_size.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
