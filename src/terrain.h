@@ -127,9 +127,6 @@ class Clipmap : public gfx::Object3D
 
   Clipmap(int levels = 16, int segments = 32, float segment_size = 2.0f)
       : shader("shaders/terrain"),
-        heightmap(PATH + "heightmap.png", params),
-        normalmap(PATH + "normalmap.png", params),
-        terrain(PATH + "texture.png", params),
         levels(levels),
         segments(segments),
         segment_size(segment_size),
@@ -142,6 +139,16 @@ class Clipmap : public gfx::Object3D
         seam(2 * segments + 2, segment_size * 2),
         terrain_size(MAX_TILE_SIZE / ZOOM_FACTOR)
   {
+    load_textures(PATH, MAX_TILE_SIZE / ZOOM_FACTOR);
+  }
+
+  // (re)load the terrain textures and the area they cover, used to switch maps at runtime
+  void load_textures(const std::string& path, float size)
+  {
+    heightmap    = std::make_unique<gfx::gl::Texture>(path + "heightmap.png", params);
+    normalmap    = std::make_unique<gfx::gl::Texture>(path + "normalmap.png", params);
+    terrain      = std::make_unique<gfx::gl::Texture>(path + "texture.png", params);
+    terrain_size = size;
   }
 
   float get_terrain_height(glm::vec2 coords) { return 0.0f; }
@@ -154,9 +161,9 @@ class Clipmap : public gfx::Object3D
       float height = camera_pos.y;
       auto camera_pos_xy = glm::vec2(camera_pos.x, camera_pos.z);
 
-      heightmap.bind(2);
-      normalmap.bind(3);
-      terrain.bind(4);
+      heightmap->bind(2);
+      normalmap->bind(3);
+      terrain->bind(4);
 
       shader.bind();
       shader.uniform("u_Heightmap", 2);
@@ -283,9 +290,9 @@ class Clipmap : public gfx::Object3D
 
  private:
   gfx::gl::Shader shader;
-  gfx::gl::Texture heightmap;
-  gfx::gl::Texture normalmap;
-  gfx::gl::Texture terrain;
+  std::unique_ptr<gfx::gl::Texture> heightmap;
+  std::unique_ptr<gfx::gl::Texture> normalmap;
+  std::unique_ptr<gfx::gl::Texture> terrain;
 
   Block tile;
   Block center;
@@ -298,7 +305,7 @@ class Clipmap : public gfx::Object3D
   unsigned index_count = 0;
   const int levels;
   const int segments;
-  const float terrain_size;  // width and length of the terrain represented by the heightmap
+  float terrain_size;  // width and length of the terrain represented by the heightmap
   const float segment_size;
 
   glm::vec2 calc_base(int level, glm::vec2 camera_pos)

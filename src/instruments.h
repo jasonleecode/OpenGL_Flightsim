@@ -417,19 +417,28 @@ inline void draw_nav_icon(ImDrawList* dl, const ImVec2& c, float r)
 
 // map display: terrain texture seen from above with the aircraft position and heading
 inline void draw_map(ImDrawList* dl, const Style& style, const ImVec2& box_min, const ImVec2& box_max,
-                     unsigned int texture, const glm::vec3& pos, float heading_deg, float terrain_size)
+                     unsigned int texture, const glm::vec3& pos, float heading_deg, float terrain_size,
+                     float zoom = 1.0f)
 {
   const float margin = 12.0f;
   const ImVec2 map_min = add(box_min, ImVec2(margin, margin));
   const ImVec2 map_max = sub(box_max, ImVec2(margin, margin));
 
-  // terrain texture: uv = pos.xz / terrain_size + 0.5 (same mapping as the terrain shader)
-  dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), map_min, map_max);
+  // aircraft position in uv space: uv = pos.xz / terrain_size + 0.5 (same mapping as the terrain shader)
+  const float u_ac = glm::clamp(pos.x / terrain_size + 0.5f, 0.0f, 1.0f);
+  const float v_ac = glm::clamp(pos.z / terrain_size + 0.5f, 0.0f, 1.0f);
+
+  // visible uv window: the whole map at zoom 1, a window centered on the aircraft when zoomed in
+  const float half = 0.5f / zoom;
+  const float u0   = glm::clamp(u_ac - half, 0.0f, 1.0f - 2.0f * half);
+  const float v0   = glm::clamp(v_ac - half, 0.0f, 1.0f - 2.0f * half);
+  dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), map_min, map_max, ImVec2(u0, v0),
+               ImVec2(u0 + 2.0f * half, v0 + 2.0f * half));
   dl->AddRect(map_min, map_max, DIM, 0.0f, 0, 1.0f);
 
-  // aircraft position on the map, clamped to the map edge
-  float u = glm::clamp(pos.x / terrain_size + 0.5f, 0.0f, 1.0f);
-  float v = glm::clamp(pos.z / terrain_size + 0.5f, 0.0f, 1.0f);
+  // aircraft position within the visible window
+  const float u = (u_ac - u0) / (2.0f * half);
+  const float v = (v_ac - v0) / (2.0f * half);
   const ImVec2 ac(map_min.x + u * (map_max.x - map_min.x), map_min.y + v * (map_max.y - map_min.y));
 
   // aircraft marker pointing along the heading (0 = +x, increasing towards +z = screen down)

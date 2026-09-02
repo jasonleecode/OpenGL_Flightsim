@@ -12,6 +12,7 @@
 #include "../lib/imgui/imgui.h"
 #include "../lib/imgui/imgui_impl_opengl3.h"
 #include "../lib/imgui/imgui_impl_sdl2.h"
+#include "../lib/stb_image.h"
 #include "ai.h"
 #include "audio.h"
 #include "collider.h"
@@ -333,14 +334,43 @@ int main(void)
   scene.add(&clipmap);
 #endif
 
+  // available maps: display name, data directory and the world area covered by its heightmap.
+  // every dataset needs heightmap.png, normalmap.png and texture.png
+  struct MapInfo {
+    const char* name;
+    const char* path;
+    float terrain_size;
+  };
+  const std::vector<MapInfo> maps = {
+      {"Vorarlberg", "assets/textures/terrain/data/10/536/356/", MAX_TILE_SIZE / 2.0f},
+      {"Vienna", "assets/textures/terrain/data/10/557/354/", MAX_TILE_SIZE / 2.0f},
+      {"Bodensee", "assets/textures/terrain/data/9/268/178/", MAX_TILE_SIZE},
+  };
+  int current_map = 0;
+
   // terrain texture for the map instrument, same source and mapping as the terrain shader
-  gfx::gl::Texture map_texture(PATH + "texture.png", gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
-  const float map_terrain_size = MAX_TILE_SIZE / ZOOM_FACTOR;
+  std::unique_ptr<gfx::gl::Texture> map_texture;
+  float map_terrain_size = 0.0f;
 
   // heightmap for terrain height lookups (used by the pull-up warning)
   int hm_width = 0, hm_height = 0, hm_channels = 0;
-  uint8_t* hm_data =
-      gfx::gl::Texture::load_image(PATH + "heightmap.png", &hm_width, &hm_height, &hm_channels, false);
+  uint8_t* hm_data = nullptr;
+
+  // reload all terrain dependent resources for the selected map
+  auto switch_map = [&](int index) {
+    const auto& m  = maps[index];
+    current_map    = index;
+    map_terrain_size = m.terrain_size;
+#if CLIPMAP
+    clipmap.load_textures(m.path, m.terrain_size);
+#endif
+    map_texture = std::make_unique<gfx::gl::Texture>(std::string(m.path) + "texture.png",
+                                                     gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
+    if (hm_data != nullptr) stbi_image_free(hm_data);
+    hm_data = gfx::gl::Texture::load_image(std::string(m.path) + "heightmap.png", &hm_width, &hm_height,
+                                           &hm_channels, false);
+  };
+  switch_map(current_map);
 
   // terrain height at world (x, z), same mapping and scale as the terrain shader
   auto terrain_height = [&](float x, float z) {
@@ -489,6 +519,7 @@ int main(void)
 
   // panel visibility, toggled with F1/F2/F3, all visible by default
   bool show_pfd = true, show_radar = true, show_map = true;
+  float map_zoom = 1.0f;  // map display zoom, mouse wheel over the map panel
   // show/hide animation state, 0 = hidden, 1 = shown
   float pfd_anim = 1.0f, radar_anim = 1.0f, map_anim = 1.0f;
   // current on-screen box positions, updated every frame, used by the blur blits
@@ -771,6 +802,13 @@ int main(void)
           switch_aircraft(MODEL_CESSNA);
         }
       }
+      if (ImGui::CollapsingHeader("Map", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (int i = 0; i < static_cast<int>(maps.size()); i++) {
+          if (ImGui::RadioButton(maps[i].name, current_map == i)) {
+            switch_map(i);
+          }
+        }
+      }
       if (ImGui::CollapsingHeader("Warnings", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderFloat("Pull up below (AGL)", &warning_altitude, 50.0f, 3500.0f, "%.0f m");
       }
@@ -911,7 +949,7 @@ int main(void)
       draw_panel_bg(dl, box_min, box_max, radar_blur_tex);
 
       instruments::draw_radar(dl, instrument_style, ImVec2(wp.x + 165.0f, wp.y + 165.0f), 115.0f, flight_time,
-                              map_texture.id, ac.position, heading_deg, map_terrain_size);
+                              map_texture->id, ac.position, heading_deg, map_terrain_size);
 
       // coordinates, top left corner of the box
       char coord[32];
@@ -939,8 +977,17 @@ int main(void)
       const ImVec2 box_max = instruments::add(map_box_cur, scope_box_size);
       draw_panel_bg(dl, box_min, box_max, map_blur_tex);
 
-      instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture.id, player.airplane.position,
-                            heading_deg, map_terrain_size);
+      // mouse wheel zoom while the cursor is over the map (manual hit test, the window
+      // itself takes no inputs)
+      const ImVec2 mouse = ImGui::GetIO().MousePos;
+      const float wheel  = ImGui::GetIO().MouseWheel;
+      if (wheel != 0.0f && mouse.x >= box_min.x && mouse.x <= box_max.x && mouse.y >= box_min.y &&
+          mouse.y <= box_max.y) {
+        map_zoom = glm::clamp(map_zoom * (1.0f + wheel * 0.15f), 1.0f, 16.0f);
+      }
+
+      instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture->id, player.airplane.position,
+                            heading_deg, map_terrain_size, map_zoom);
 
       ImGui::End();
       ImGui::PopStyleColor();
