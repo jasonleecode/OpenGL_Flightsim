@@ -1,5 +1,7 @@
 #include "gfx.h"
 
+#include <algorithm>
+
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "../lib/tiny_obj_loader.h"
 
@@ -118,6 +120,12 @@ Texture::Texture(const std::string& path, const TextureParams& params)
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, params.texture_wrap);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, params.texture_min_filter);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, params.texture_mag_filter);
+
+  if (params.anisotropy > 0.0f) {
+    GLfloat max_aniso = 1.0f;
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &max_aniso);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(params.anisotropy, max_aniso));
+  }
 
   // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);

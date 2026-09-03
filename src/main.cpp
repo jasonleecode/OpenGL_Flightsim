@@ -403,13 +403,32 @@ int main(void)
   int hm_width = 0, hm_height = 0, hm_channels = 0;
   uint8_t* hm_data = nullptr;
 
-  // reload all terrain dependent resources for the selected map
+  // graphics quality presets: high detail terrain texture, anisotropic filtering, fog range
+  struct GfxPreset {
+    const char* name;
+    bool hires;
+    float anisotropy;
+    float fog_min, fog_max;
+  };
+  const GfxPreset gfx_presets[] = {
+      {"Low", false, 0.0f, 1000.0f, 60000.0f},
+      {"Medium", false, 4.0f, 1000.0f, 100000.0f},
+      {"High", true, 8.0f, 1000.0f, 100000.0f},
+      {"Ultra", true, 16.0f, 2000.0f, 250000.0f},
+  };
+  int gfx_preset = 3;  // ultra by default
+
+  // reload all terrain dependent resources for the selected map, applying the
+  // current graphics quality preset to the 3d terrain
   auto switch_map = [&](int index) {
     const auto& m  = maps[index];
     current_map    = index;
     map_terrain_size = m.terrain_size;
 #if CLIPMAP
-    clipmap.load_textures(m.path, m.terrain_size);
+    const auto& gp   = gfx_presets[gfx_preset];
+    clipmap.fog_min  = gp.fog_min;
+    clipmap.fog_max  = gp.fog_max;
+    clipmap.load_textures(m.path, m.terrain_size, gp.hires, gp.anisotropy);
 #endif
     map_texture = std::make_unique<gfx::gl::Texture>(std::string(m.path) + "texture.png",
                                                      gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
@@ -859,6 +878,14 @@ int main(void)
         for (int i = 0; i < static_cast<int>(maps.size()); i++) {
           if (ImGui::RadioButton(maps[i].name.c_str(), current_map == i)) {
             switch_map(i);
+          }
+        }
+      }
+      if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (int i = 0; i < 4; i++) {
+          if (ImGui::RadioButton(gfx_presets[i].name, gfx_preset == i)) {
+            gfx_preset = i;
+            switch_map(current_map);  // reload the terrain textures with the new quality
           }
         }
       }

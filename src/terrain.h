@@ -1,5 +1,7 @@
 #pragma once
 
+#include <filesystem>
+
 #include "gfx.h"
 
 constexpr unsigned int primitive_restart = 0xFFFFU;
@@ -19,8 +21,6 @@ const int ZOOM_FACTOR = 2;
 const std::string PATH = "assets/textures/terrain/data/10/536/356/";
 const int ZOOM_FACTOR = 2;
 #endif
-
-const gfx::gl::TextureParams params = {.texture_wrap = GL_REPEAT, .texture_mag_filter = GL_LINEAR};
 
 struct Seam {
   gfx::gl::VertexBuffer vbo;
@@ -124,6 +124,8 @@ class Clipmap : public gfx::Object3D
 {
  public:
   bool wireframe = false;
+  // distance fog range in meters, terrain fades into the sky color between them
+  float fog_min = 1000.0f, fog_max = 100000.0f;
 
   Clipmap(int levels = 16, int segments = 32, float segment_size = 2.0f)
       : shader("shaders/terrain"),
@@ -142,12 +144,18 @@ class Clipmap : public gfx::Object3D
     load_textures(PATH, MAX_TILE_SIZE / ZOOM_FACTOR);
   }
 
-  // (re)load the terrain textures and the area they cover, used to switch maps at runtime
-  void load_textures(const std::string& path, float size)
+  // (re)load the terrain textures and the area they cover, used to switch maps or
+  // change the graphics quality at runtime. hires picks texture_hires.png when the
+  // dataset provides one, anisotropy sharpens oblique views of the ground
+  void load_textures(const std::string& path, float size, bool hires = true, float anisotropy = 16.0f)
   {
-    heightmap    = std::make_unique<gfx::gl::Texture>(path + "heightmap.png", params);
-    normalmap    = std::make_unique<gfx::gl::Texture>(path + "normalmap.png", params);
-    terrain      = std::make_unique<gfx::gl::Texture>(path + "texture.png", params);
+    const gfx::gl::TextureParams tex_params = {
+        .texture_wrap = GL_REPEAT, .texture_mag_filter = GL_LINEAR, .anisotropy = anisotropy};
+    heightmap = std::make_unique<gfx::gl::Texture>(path + "heightmap.png", tex_params);
+    normalmap = std::make_unique<gfx::gl::Texture>(path + "normalmap.png", tex_params);
+    const std::string hires_path = path + "texture_hires.png";
+    const bool use_hires         = hires && std::filesystem::exists(hires_path);
+    terrain = std::make_unique<gfx::gl::Texture>(use_hires ? hires_path : path + "texture.png", tex_params);
     terrain_size = size;
   }
 
@@ -174,6 +182,8 @@ class Clipmap : public gfx::Object3D
       shader.uniform("u_CameraPos", context.camera->get_world_position());
       shader.uniform("u_Projection", context.camera->get_projection_matrix());
       shader.uniform("u_TerrainSize", terrain_size);
+      shader.uniform("u_FogMin", fog_min);
+      shader.uniform("u_FogMax", fog_max);
 
       glEnable(GL_CULL_FACE);
       glEnable(GL_PRIMITIVE_RESTART);

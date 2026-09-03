@@ -4,6 +4,8 @@ out vec4 FragColor;
 
 uniform float u_Level;
 uniform vec3 u_Background;
+uniform float u_FogMin;
+uniform float u_FogMax;
 uniform sampler2D u_Heightmap;
 uniform sampler2D u_Normalmap;
 uniform sampler2D u_Texture;
@@ -35,15 +37,14 @@ void main()
 {
   vec3 lightDir = vec3(-2.0, 4.0, -1.0);
 
-  // Calculate fog
-  float fogMaxdist = 100000.0;
-  float fogMindist = 1000.0;
+  // distance fog towards the sky color
   vec4 fogColor = vec4(u_Background, 1.0);
 
   float dist = length(FragPos.xyz - u_CameraPos);
-  float fogFactor = (fogMaxdist - dist) / (fogMaxdist - fogMindist);
+  float fogFactor = (u_FogMax - dist) / (u_FogMax - u_FogMin);
   fogFactor = clamp(fogFactor, 0.0, 1.0);
 
-  vec4 terrainColor = vec4(calculateDirLight(lightDir, Normal, texture(u_Texture, TexCoord).rgb), 1.0);
+  // negative mipmap bias sharpens the terrain texture (less trilinear blur)
+  vec4 terrainColor = vec4(calculateDirLight(lightDir, Normal, texture(u_Texture, TexCoord, -0.75).rgb), 1.0);
   FragColor = mix(fogColor, terrainColor, fogFactor);
 }
