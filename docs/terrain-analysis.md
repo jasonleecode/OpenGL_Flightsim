@@ -40,4 +40,4 @@
 
 - **湖不是水**,只是卫星照片里的蓝色像素 + 那里海拔低,没有水面模拟
 - **没有地形碰撞**——CPU 端没有网格碰撞体,飞机会穿山。唯一的例外是拉升警告,它在 CPU 端单独采样了高度图(`src/main.cpp` 里的 `terrain_height`)
-- 想换地区的话,改 `src/terrain.h:19` 的瓦片坐标 `PATH` 并用 `tools/terrain` 的脚本重新下载数据即可(脚本里还注释着卢卡拉、珠峰的坐标)
+- **更换/新增地区**:用 `tools/terrain/download_map.py`(命令行,输入经纬度)或 `tools/terrain/map_gui.py`(GUI,可预览选区、管理已有地图)下载数据集。数据集带有 `map.info` 元数据文件,游戏启动时自动扫描 `assets/textures/terrain/data/` 下所有数据集,无需改代码

@@ -2,3 +2,8 @@
 build/
 Debug/
 Release/
+imgui.ini
+__pycache__/
+
+# high detail map textures are too large for git, regenerate with tools/terrain/download_map.py
+texture_hires.png

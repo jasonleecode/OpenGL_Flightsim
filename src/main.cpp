@@ -3,7 +3,9 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -334,25 +336,67 @@ int main(void)
   scene.add(&clipmap);
 #endif
 
-  // available maps: display name, data directory, the world area covered by its heightmap
-  // and the upper left web mercator tile the 4x4 tile dataset starts at.
-  // every dataset needs heightmap.png, normalmap.png and texture.png
+  // available maps, discovered by scanning the terrain data directory. a dataset is a
+  // directory data/<zoom>/<xtile>/<ytile>/ containing the three textures and a map.info
+  // file with the display name and tile coordinates, e.g. written by tools/terrain
   struct MapInfo {
-    const char* name;
-    const char* path;
+    std::string name;
+    std::string path;
     float terrain_size;
     int zoom, xtile, ytile;
   };
-  const std::vector<MapInfo> maps = {
-      {"Vorarlberg", "assets/textures/terrain/data/10/536/356/", MAX_TILE_SIZE / 2.0f, 10, 536, 356},
-      {"Vienna", "assets/textures/terrain/data/10/557/354/", MAX_TILE_SIZE / 2.0f, 10, 557, 354},
-      {"Bodensee", "assets/textures/terrain/data/9/268/178/", MAX_TILE_SIZE, 9, 268, 178},
-      {"Beijing", "assets/textures/terrain/data/10/842/387/", MAX_TILE_SIZE / 2.0f, 10, 842, 387},
-  };
+  std::vector<MapInfo> maps;
+  {
+    auto trim = [](std::string s) {
+      const char* ws = " \t\r\n";
+      const auto a = s.find_first_not_of(ws), b = s.find_last_not_of(ws);
+      return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    };
+    const std::string data_dir = "assets/textures/terrain/data";
+    std::error_code ec;
+    for (const auto& zdir : std::filesystem::directory_iterator(data_dir, ec)) {
+      if (!zdir.is_directory()) continue;
+      for (const auto& xdir : std::filesystem::directory_iterator(zdir, ec)) {
+        if (!xdir.is_directory()) continue;
+        for (const auto& ydir : std::filesystem::directory_iterator(xdir, ec)) {
+          if (!ydir.is_directory()) continue;
+          const std::string dir = ydir.path().string() + "/";
+          if (!std::filesystem::exists(dir + "heightmap.png") || !std::filesystem::exists(dir + "normalmap.png") ||
+              !std::filesystem::exists(dir + "texture.png"))
+            continue;
+          std::ifstream info_file(dir + "map.info");
+          if (!info_file) continue;
+
+          MapInfo m;
+          m.path   = dir;
+          m.name   = ydir.path().filename().string();
+          m.zoom   = m.xtile = m.ytile = 0;
+          std::string line;
+          while (std::getline(info_file, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const std::string key = trim(line.substr(0, eq)), val = trim(line.substr(eq + 1));
+            if (key == "name") m.name = val;
+            else if (key == "zoom") m.zoom = std::stoi(val);
+            else if (key == "xtile") m.xtile = std::stoi(val);
+            else if (key == "ytile") m.ytile = std::stoi(val);
+          }
+          // world area covered: 50708*4 meters at zoom 9, halving per zoom level
+          m.terrain_size = 50708.0f * 4.0f / std::pow(2.0f, m.zoom - 9);
+          maps.push_back(m);
+        }
+      }
+    }
+    std::sort(maps.begin(), maps.end(), [](const MapInfo& a, const MapInfo& b) { return a.name < b.name; });
+    if (maps.empty()) {  // fallback if the data directory is missing
+      maps.push_back({"Vorarlberg", "assets/textures/terrain/data/10/536/356/", MAX_TILE_SIZE / 2.0f, 10, 536, 356});
+    }
+  }
   int current_map = 0;
 
-  // terrain texture for the map instrument, same source and mapping as the terrain shader
-  std::unique_ptr<gfx::gl::Texture> map_texture;
+  // terrain texture for the map instrument, same source and mapping as the terrain shader.
+  // texture_hires.png is an optional high detail version used when zooming into the map
+  std::unique_ptr<gfx::gl::Texture> map_texture, map_texture_hires;
   float map_terrain_size = 0.0f;
 
   // heightmap for terrain height lookups (used by the pull-up warning)
@@ -369,6 +413,11 @@ int main(void)
 #endif
     map_texture = std::make_unique<gfx::gl::Texture>(std::string(m.path) + "texture.png",
                                                      gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR});
+    const std::string hires_path = std::string(m.path) + "texture_hires.png";
+    map_texture_hires =
+        std::filesystem::exists(hires_path)
+            ? std::make_unique<gfx::gl::Texture>(hires_path, gfx::gl::TextureParams{.texture_mag_filter = GL_LINEAR})
+            : nullptr;
     if (hm_data != nullptr) stbi_image_free(hm_data);
     hm_data = gfx::gl::Texture::load_image(std::string(m.path) + "heightmap.png", &hm_width, &hm_height,
                                            &hm_channels, false);
@@ -522,7 +571,8 @@ int main(void)
 
   // panel visibility, toggled with F1/F2/F3, all visible by default
   bool show_pfd = true, show_radar = true, show_map = true;
-  float map_zoom = 1.0f;  // map display zoom, mouse wheel over the map panel
+  float map_zoom = 1.0f;               // map display zoom, mouse wheel over the map panel
+  ImVec2 map_center_uv(0.5f, 0.5f);    // uv point the zoomed map view is centered on
   // show/hide animation state, 0 = hidden, 1 = shown
   float pfd_anim = 1.0f, radar_anim = 1.0f, map_anim = 1.0f;
   // current on-screen box positions, updated every frame, used by the blur blits
@@ -807,7 +857,7 @@ int main(void)
       }
       if (ImGui::CollapsingHeader("Map", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (int i = 0; i < static_cast<int>(maps.size()); i++) {
-          if (ImGui::RadioButton(maps[i].name, current_map == i)) {
+          if (ImGui::RadioButton(maps[i].name.c_str(), current_map == i)) {
             switch_map(i);
           }
         }
@@ -980,17 +1030,40 @@ int main(void)
       const ImVec2 box_max = instruments::add(map_box_cur, scope_box_size);
       draw_panel_bg(dl, box_min, box_max, map_blur_tex);
 
-      // mouse wheel zoom while the cursor is over the map (manual hit test, the window
-      // itself takes no inputs)
-      const ImVec2 mouse = ImGui::GetIO().MousePos;
-      const float wheel  = ImGui::GetIO().MouseWheel;
-      if (wheel != 0.0f && mouse.x >= box_min.x && mouse.x <= box_max.x && mouse.y >= box_min.y &&
-          mouse.y <= box_max.y) {
-        map_zoom = glm::clamp(map_zoom * (1.0f + wheel * 0.15f), 1.0f, 16.0f);
+      // mouse wheel zoom while the cursor is over the map, centered on the cursor
+      // position (manual hit test, the window itself takes no inputs)
+      {
+        // at full zoom-out the view follows the aircraft again
+        if (map_zoom <= 1.0f) {
+          map_center_uv = ImVec2(glm::clamp(ac.position.x / map_terrain_size + 0.5f, 0.0f, 1.0f),
+                                 glm::clamp(ac.position.z / map_terrain_size + 0.5f, 0.0f, 1.0f));
+        }
+        const float margin = 12.0f;  // same inset as draw_map
+        const ImVec2 map_min = instruments::add(box_min, ImVec2(margin, margin));
+        const ImVec2 map_max = instruments::sub(box_max, ImVec2(margin, margin));
+        const ImVec2 mouse   = ImGui::GetIO().MousePos;
+        const float wheel    = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f && mouse.x >= map_min.x && mouse.x <= map_max.x && mouse.y >= map_min.y &&
+            mouse.y <= map_max.y) {
+          // uv under the cursor in the current window
+          const float half_old = 0.5f / map_zoom;
+          const float u0_old   = glm::clamp(map_center_uv.x - half_old, 0.0f, 1.0f - 2.0f * half_old);
+          const float v0_old   = glm::clamp(map_center_uv.y - half_old, 0.0f, 1.0f - 2.0f * half_old);
+          const float mx       = (mouse.x - map_min.x) / (map_max.x - map_min.x);
+          const float my       = (mouse.y - map_min.y) / (map_max.y - map_min.y);
+          const float mu       = u0_old + mx * 2.0f * half_old;
+          const float mv       = v0_old + my * 2.0f * half_old;
+
+          // keep that uv under the cursor in the new window
+          map_zoom             = glm::clamp(map_zoom * (1.0f + wheel * 0.15f), 1.0f, 32.0f);
+          const float half_new = 0.5f / map_zoom;
+          map_center_uv = ImVec2(mu + (0.5f - mx) * 2.0f * half_new, mv + (0.5f - my) * 2.0f * half_new);
+        }
       }
 
-      instruments::draw_map(dl, instrument_style, box_min, box_max, map_texture->id, player.airplane.position,
-                            heading_deg, map_terrain_size, map_zoom);
+      instruments::draw_map(dl, instrument_style, box_min, box_max,
+                            map_texture_hires != nullptr ? map_texture_hires->id : map_texture->id,
+                            player.airplane.position, heading_deg, map_terrain_size, map_zoom, map_center_uv);
 
       // aircraft lat/lon in the top left corner of the box: web mercator conversion from
       // the world position through the dataset's tile coordinates (4x4 tiles per dataset)
